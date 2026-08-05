@@ -1,0 +1,9 @@
+{
+  "extraPaths": ["."],
+  "reportMissingImports": "none",
+  "reportArgumentType": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportCallIssue": "none",
+  "reportFunctionMemberAccess": "none",
+  "reportGeneralTypeIssues": "none"
+}

@@ -1,0 +1,12 @@
+# Copyright 2026 Anthropic PBC
+# SPDX-License-Identifier: Apache-2.0
+[theme]
+base = "dark"
+primaryColor = "#39bae6"
+backgroundColor = "#0b0e14"
+secondaryBackgroundColor = "#11151c"
+textColor = "#c9d1d9"
+font = "monospace"
+
+[server]
+runOnSave = true
