@@ -1,0 +1,82 @@
+/* Copyright 2026 Anthropic PBC */
+/* SPDX-License-Identifier: Apache-2.0 */
+@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --bg: #0b0e14;
+  --surface: #11151c;
+  --surface-2: #1a1f29;
+  --text: #c9d1d9;
+  --text-dim: #6b7280;
+  --accent: #39bae6;
+  --border: #1e2530;
+}
+
+html, body, [class*="st-"], .stApp {
+  font-family: 'IBM Plex Mono', ui-monospace, monospace !important;
+}
+[data-testid="stIconMaterial"],
+[data-testid^="stExpanderIcon"],
+[data-testid^="stStatusWidget"] span[translate="no"] {
+  font-family: 'Material Symbols Rounded' !important;
+}
+
+h1, h2, h3, .stTitle, [data-testid="stHeader"] {
+  font-family: 'Chakra Petch', sans-serif !important;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+/* subtle scanline grain */
+.stApp::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(255,255,255,0.012) 0px,
+    rgba(255,255,255,0.012) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  z-index: 1;
+}
+
+/* tighten sidebar */
+[data-testid="stSidebar"] {
+  background: #07090d;
+  border-right: 1px solid var(--border);
+}
+
+/* chat */
+[data-testid="stChatMessage"] {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+/* status (tool) boxes */
+[data-testid="stStatus"] {
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+
+/* side chat panel */
+[data-testid="stChatInput"] {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+[data-testid="stChatInput"] textarea {
+  font-family: 'IBM Plex Mono', monospace !important;
+  font-size: 13px;
+}
+[data-testid="stChatMessage"] {
+  font-size: 13px;
+  padding: 10px 12px;
+}
+h5:has(+ *) { /* chat panel header */
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 12px;
+  color: var(--accent);
+}
