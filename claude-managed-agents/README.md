@@ -69,7 +69,7 @@ Start a new session by clicking the '+' sign.
 Try: *"list the namespaces and pods you can see, then point out
 anything that looks unhealthy."*
 
-You can review logs from the session including how long the response took and how many tokens were used in [Managed Agents --> Sessions](https://platform.claude.com/)
+You can review logs from the session including how long the response took and how many tokens were used under [Managed Agents -> Sessions](https://platform.claude.com/).
 
 When you're done: `./kind/teardown.sh` deletes the kind cluster, and
 Ctrl-C stops `run-k8s-mcp.sh`.
