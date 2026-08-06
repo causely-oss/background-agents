@@ -24,7 +24,12 @@ RUNNER=(kubernetes-mcp-server)
 command -v kubernetes-mcp-server >/dev/null || RUNNER=(npx -y kubernetes-mcp-server@latest)
 
 echo "Starting kubernetes-mcp-server (read-only) on :$PORT against $KUBECONFIG_PATH"
-"${RUNNER[@]}" --port "$PORT" --read-only --kubeconfig "$KUBECONFIG_PATH" &
+# The MCP Go SDK's DNS-rebinding protection rejects any request that arrives over a
+# loopback connection with a non-loopback Host header — which is exactly what the
+# cloudflared tunnel sends (it forwards the public trycloudflare.com hostname to
+# localhost). Disabling it here is safe: real protection against a rebound DNS name
+# still comes from the tunnel only exposing this one server, not from the Host check.
+MCPGODEBUG=disablelocalhostprotection=1 "${RUNNER[@]}" --port "$PORT" --read-only --kubeconfig "$KUBECONFIG_PATH" &
 MCP_PID=$!
 
 TUNNEL_LOG="$(mktemp)"
