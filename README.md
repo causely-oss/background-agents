@@ -1,8 +1,8 @@
 # background-agents
 
-Examples of giving background agents context to reason about a live system and resolve issues quicker, with using tokens and no helucinations. 
+Examples of giving background agents the context to reason about a live system, so they resolve issues faster, with fewer tokens and without hallucinating.
 
-A background agent with read access to metrics, logs, and traces and predefined run-books still can't tell cause from symptom. The example show how to add the casual context the agent needs to be affective.  
+A background agent with read access to metrics, logs, and traces, and predefined runbooks, still can't tell cause from symptom. These examples show how to add the causal context an agent needs to be effective.
 
 Each example is self-contained and runnable.
 
