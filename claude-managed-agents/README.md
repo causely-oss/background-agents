@@ -4,7 +4,7 @@
 # Managed Agent · Remote MCP servers
 
 > Based on Anthropic's [ship-your-first-managed-agent](https://github.com/anthropic-experimental/cwc-workshops)
-> workshop. Not maintained and not accepting contributions.
+> workshop.
 
 A [Claude Managed Agent](https://platform.claude.com/docs/en/managed-agents/overview)
 running in Anthropic's cloud, wired up to remote MCP servers so it can
@@ -27,7 +27,7 @@ quick tunnel gives it a public HTTPS URL the cloud agent can call. Nothing
 in this setup ever points the agent at `localhost`.
 
 The cloudflared quick tunnel is the works-today default here, good for
-local development and demos. For a production or enterprise deployment —
+local development and proof of concept. For a production or enterprise deployment —
 where you don't want to expose your cluster publicly at all — Anthropic
 Managed Agents' native **MCP tunnels** feature (research preview, request
 access) is the right path: an outbound-only gateway you deploy, with no
@@ -42,8 +42,8 @@ Node (for `npx`) or Go, Python 3.10+, and an
 [Anthropic API key](https://console.anthropic.com/settings/keys).
 
 ```bash
-git clone <this-repo>
-cd claude-managed-agents
+git clone https://github.com/causely-oss/background-agents.git
+cd background-agents/claude-managed-agents 
 
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
@@ -62,8 +62,14 @@ streamlit run app.py
 ```
 
 The dashboard opens at `localhost:8501` with a chat panel talking to the
-agent. Try: *"list the namespaces and pods you can see, then point out
+agent. 
+
+Start a new session by clicking the '+' sign. 
+
+Try: *"list the namespaces and pods you can see, then point out
 anything that looks unhealthy."*
+
+You can review logs from the session including how long the response took and how many tokens were used in [Managed Agents --> Sessions](https://platform.claude.com/)
 
 When you're done: `./kind/teardown.sh` deletes the kind cluster, and
 Ctrl-C stops `run-k8s-mcp.sh`.
@@ -81,6 +87,66 @@ Ctrl-C stops `run-k8s-mcp.sh`.
 
 Full explanation of the vault mechanism and the Bearer-only connector
 constraint: [docs/auth.md](docs/auth.md).
+
+## Trying it with Grafana and Causely
+
+Both are optional add-ons on top of the k8s MCP server above, and both follow
+the same pattern: stand up the server, tunnel it, add its URL (and any
+credential) to `.env`, then **fully restart** `streamlit run app.py` — not
+just refresh the browser. `setup_agent()` is cached for the life of the
+process, so a still-running process keeps reusing an agent that was created
+without the new server wired in.
+
+### Add Grafana
+
+Follow [docs/grafana.md](docs/grafana.md) to install kube-prometheus-stack,
+create a read-only Grafana service-account token, and tunnel `mcp-grafana`.
+Then set in `.env`:
+
+```bash
+GRAFANA_MCP_URL=https://<grafana-tunnel-host>.trycloudflare.com/mcp
+GRAFANA_TOKEN=<the service account token>
+```
+
+Restart Streamlit and try:
+
+*"Check the `demo` namespace for anything unhealthy, then pull CPU and
+memory usage for the affected pod over the last 15 minutes from Grafana."*
+
+That exercises both servers in one turn — k8s tools to find the workload,
+Grafana tools to pull the metrics behind it.
+
+### Add Causely
+
+Causely is a causal-analysis layer that already models this cluster's
+topology and root causes, so the agent is instructed (`_CAUSELY_FIRST` in
+`provided.py`) to treat its diagnosis as authoritative rather than
+re-deriving one from raw k8s/Grafana state. Set in `.env`:
+
+```bash
+ENABLE_CAUSELY=1
+CAUSELY_MCP_URL=https://api.causely.app/mcp
+CAUSELY_CLIENT_ID=<your Causely client id>
+CAUSELY_CLIENT_SECRET=<your Causely client secret>
+CAUSELY_TOKEN_URL=https://auth.causely.app/frontegg/identity/resources/auth/v2/api-token
+```
+
+Restart Streamlit and try:
+
+*"What's broken in this cluster right now, and what's the root cause?"*
+
+With Causely wired in, the agent calls `get_diagnoses` first and returns its
+diagnosis directly.
+
+## Want a more realistic scenario?
+
+The `kind/` demo here is intentionally minimal — three pods, one deliberately
+crash-looping, just enough to exercise the agent end-to-end. For a fuller
+application topology with realistic services and chaos scenarios to
+investigate, see [causely-oss/otel-demo](https://github.com/causely-oss/otel-demo)
+and point `run-k8s-mcp.sh` (and, if you're using Grafana,
+[docs/grafana.md](docs/grafana.md)'s kube-prometheus-stack) at that cluster
+instead of the one from `kind/setup.sh`.
 
 ## The Managed Agents resource model
 

@@ -4,10 +4,11 @@
 import streamlit as st
 from dotenv import load_dotenv
 
+load_dotenv()
+
 from ui import inject_style
 from provided import chat_panel
 
-load_dotenv()
 st.set_page_config(page_title="Managed Agent · Remote MCP", page_icon="▮", layout="wide")
 inject_style()
 
