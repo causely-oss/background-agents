@@ -1,0 +1,38 @@
+{
+  "type": "ProblemDetected",
+  "name": "Service Malfunction",
+  "objectId": "9591a6d6-4171-4613-8941-7472aaa4175e",
+  "object_type": "defect",
+  "severity": "Critical",
+  "timestamp": "2026-08-05T13:57:16.000Z",
+  "link": "https://app.causely.app/diagnoses/9591a6d6-4171-4613-8941-7472aaa4175e",
+  "entity": {
+    "id": "db9c9c49-8ad4-5bb2-a3e5-6d53b2ac1991",
+    "name": "tracey-shop/tracey-shop-payment-gw",
+    "type": "Service",
+    "link": "https://app.causely.app/topology/db9c9c49-8ad4-5bb2-a3e5-6d53b2ac1991"
+  },
+  "labels": {
+    "k8s.cluster.name": "demo-cluster",
+    "k8s.cluster.uid": "b0b2162a-ce5b-44ea-9dac-b4380b99f614",
+    "k8s.namespace.name": "tracey-shop",
+    "k8s.controller.kind": "Deployment",
+    "causely.ai/cluster": "demo-cluster",
+    "causely.ai/namespace": "tracey-shop",
+    "causely.ai/service": "payment-gw"
+  },
+  "description": {
+    "summary": "The payment gateway service tracey-shop-payment-gw experienced a malfunction resulting in payment authorization rejections.",
+    "details": "The container shopd logged 242 occurrences of 'payment authorization rejected by acquirer: no auth code returned' starting at 2026-08-05T13:33:55Z. This failure propagated upstream, causing request error rates across dependent services including storefront-bff and checkout-api. Impacted services: tracey-shop/tracey-shop-checkout-api, tracey-shop/tracey-shop-storefront-bff, tracey-shop/tracey-shop-web-client, tracey-shop/tracey-shop-payment-gw.",
+    "remediationOptions": [
+      {
+        "title": "Investigate payment gateway integration and acquirer credentials",
+        "description": "Review the payment integration configuration in tracey-shop-payment-gw, specifically the STRIPE_URL endpoint setting. Authorizations failing with no auth code returned typically points to invalid API keys, expired merchant credentials, or payload formatting issues between the gateway and the external acquirer."
+      },
+      {
+        "title": "Verify secret references and outbound connectivity",
+        "description": "Inspect the deployment manifest for secret references used for payment credentials that may need rotation, and check container logs for outbound network timeouts or TLS handshake errors when reaching the upstream financial endpoint."
+      }
+    ]
+  }
+}
