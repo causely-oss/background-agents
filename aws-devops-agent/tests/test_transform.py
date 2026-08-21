@@ -6,7 +6,7 @@ Runs with no AWS access and no dependencies:
     python3 tests/test_transform.py
 
 The translation is the part of the relay most likely to break silently — a wrong
-severity mapping or a dropped diagnosis id degrades the result without erroring, so
+severity mapping or a dropped object id degrades the result without erroring, so
 it is worth pinning down here rather than discovering it live.
 """
 
@@ -49,7 +49,7 @@ class TestToIncident(unittest.TestCase):
         for field in ("incidentId", "action", "priority", "title", "timestamp", "service"):
             self.assertIn(field, self.incident)
 
-    def test_diagnosis_id_becomes_incident_id(self) -> None:
+    def test_object_id_becomes_incident_id(self) -> None:
         # Reusing Causely's objectId keeps the two systems talking about one thing.
         self.assertEqual(self.incident["incidentId"], FIXTURE["objectId"])
 
@@ -82,11 +82,32 @@ class TestToIncident(unittest.TestCase):
         # This is the hinge of the integration: without these the agent cannot pull the
         # causal chain back out of Causely.
         data = self.incident["data"]
-        self.assertEqual(data["causelyDiagnosisId"], FIXTURE["objectId"])
+        self.assertEqual(data["causelyObjectId"], FIXTURE["objectId"])
+        self.assertEqual(data["causelyObjectType"], "issue")
         self.assertEqual(data["causelyLink"], FIXTURE["link"])
-        self.assertEqual(data["cluster"], "chaos")
+        self.assertEqual(data["cluster"], "demo-cluster")
         self.assertEqual(data["namespace"], "checkout")
+        self.assertIn("get_issue_details", data["investigationHint"])
+        self.assertIn("issue_id", data["investigationHint"])
+
+    def test_defect_notification_points_at_the_diagnosis_tool(self) -> None:
+        # The relay handles defect-level notifications too; the object_type is what
+        # decides which tool can actually resolve the id.
+        data = handler.to_incident(dict(FIXTURE, object_type="defect"))["data"]
+        self.assertEqual(data["causelyObjectType"], "defect")
         self.assertIn("get_diagnosis_details", data["investigationHint"])
+        self.assertIn("diagnosis_id", data["investigationHint"])
+        self.assertNotIn("get_issue_details", data["investigationHint"])
+
+    def test_unknown_object_type_assumes_issue_and_says_so(self) -> None:
+        # Sending Issues is the documented setup, so an absent object_type is
+        # treated as one — but the hint names the fallback rather than guessing
+        # silently and leaving the agent with an id no tool will resolve.
+        payload = dict(FIXTURE)
+        payload.pop("object_type")
+        hint = handler.to_incident(payload)["data"]["investigationHint"]
+        self.assertIn("get_issue_details", hint)
+        self.assertIn("get_diagnosis_details", hint)
 
     def test_no_empty_values_survive(self) -> None:
         for key, value in self.incident.items():
@@ -103,7 +124,7 @@ class TestToIncident(unittest.TestCase):
 
     def test_empty_payload_does_not_crash(self) -> None:
         result = handler.to_incident({})
-        self.assertEqual(result["title"], "Causely diagnosis")
+        self.assertEqual(result["title"], "Causely issue")
 
     def test_string_description_passes_through(self) -> None:
         result = handler.to_incident(dict(FIXTURE, description="plain text"))

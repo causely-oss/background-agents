@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Build a notification fixture from a real, currently-active Causely diagnosis.
+# Build a notification fixture from a real, currently-active Causely Issue.
 #
 #   CAUSELY_CLIENT_ID=... CAUSELY_CLIENT_SECRET=... scripts/make-fixture.sh
 #   ... scripts/make-fixture.sh --out tests/fixtures/causely-live.json
-#   ... scripts/make-fixture.sh --diagnosis-id <id>
+#   ... scripts/make-fixture.sh --issue-id <id>
 #
 # Why this exists: a synthetic fixture describes a problem the tenant does not
 # actually have, and the agent correctly refuses to corroborate it — it queries
 # Causely, finds nothing, and concludes the alert is bogus. Technically a good
 # result, and a completely uninformative test. Driving the flow from a live
-# diagnosis id means get_diagnosis_details returns a real causal chain.
+# Issue id means get_issue_details returns a real causal chain.
 #
-# Run this shortly before you need it. Diagnoses resolve, and a resolved one puts
+# Run this shortly before you need it. Issues resolve, and a resolved one puts
 # you right back in the "cannot corroborate" hole.
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -20,11 +20,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 : "${CAUSELY_CLIENT_SECRET:?set CAUSELY_CLIENT_SECRET}"
 
 out_file="$REPO_ROOT/tests/fixtures/causely-live.json"
-diagnosis_id=""
+issue_id=""
 while (( $# )); do
   case "$1" in
     --out) out_file="$2"; shift 2 ;;
-    --diagnosis-id) diagnosis_id="$2"; shift 2 ;;
+    --issue-id) issue_id="$2"; shift 2 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -44,27 +44,20 @@ access_token="$(json_get "$token_response" access_token)"
 ok "authenticated"
 
 # ---------------------------------------------------------------------------
-info "Fetching active diagnoses"
+info "Fetching active issues"
 # ---------------------------------------------------------------------------
 
-if [[ -n "$diagnosis_id" ]]; then
-  arguments="$(python3 -c '
-import json, sys
-print(json.dumps({"diagnosis_id": sys.argv[1]}))
-' "$diagnosis_id")"
-else
-  arguments='{"active_only": true}'
-fi
-
+# --issue-id filters the returned list rather than being passed as a tool
+# argument, so this does not depend on the tool's filter parameter names.
 request="$(python3 -c '
-import json, sys
+import json
 print(json.dumps({
     "jsonrpc": "2.0",
     "id": 1,
     "method": "tools/call",
-    "params": {"name": "get_diagnoses", "arguments": json.loads(sys.argv[1])},
+    "params": {"name": "get_issues", "arguments": {"active_only": True}},
 }))
-' "$arguments")"
+')"
 
 response_file="$(mktemp)"
 trap 'rm -f "$response_file"' EXIT
@@ -72,16 +65,17 @@ curl -sS --max-time 60 -X POST "$CAUSELY_MCP_ENDPOINT" \
   -H "Authorization: Bearer ${access_token}" \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
-  -d "$request" >"$response_file" 2>/dev/null || die "get_diagnoses call failed"
+  -d "$request" >"$response_file" 2>/dev/null || die "get_issues call failed"
 
 # ---------------------------------------------------------------------------
 info "Building the fixture"
 # ---------------------------------------------------------------------------
 
-python3 - "$response_file" "$out_file" "$CAUSELY_APP_BASE" <<'PY'
+python3 - "$response_file" "$out_file" "$CAUSELY_APP_BASE" "$issue_id" <<'PY'
 import json, re, sys
 
 app_base = sys.argv[3].rstrip("/")
+wanted_id = sys.argv[4] if len(sys.argv) > 4 else ""
 raw = open(sys.argv[1]).read()
 
 # Streamable HTTP may answer as SSE. Take the last data: frame, else the whole body.
@@ -106,17 +100,31 @@ for block in (envelope.get("result") or {}).get("content") or []:
 if payload is None:
     payload = (envelope.get("result") or {}).get("structuredContent") or {}
 
-diagnoses = payload.get("diagnoses") if isinstance(payload, dict) else None
-if not diagnoses:
-    sys.exit("no active diagnoses returned — nothing to build a fixture from")
+# Prefer Issues, the incident-level view. Fall back to a diagnoses key so this
+# keeps working if the tool's response shape differs, and record which it was —
+# the relay uses object_type to pick the tool it points the agent at.
+records, object_type = None, "issue"
+if isinstance(payload, dict):
+    records = payload.get("issues")
+    if not records:
+        records = payload.get("diagnoses")
+        if records:
+            object_type = "defect"
+if not records:
+    sys.exit("no active issues returned — nothing to build a fixture from")
+
+if wanted_id:
+    records = [r for r in records if str(r.get("id")) == wanted_id]
+    if not records:
+        sys.exit(f"no active issue with id {wanted_id}")
 
 RANK = {"critical": 0, "high": 1, "medium": 2, "minor": 3, "low": 4}
-diagnoses.sort(key=lambda d: RANK.get(str(d.get("severity", "")).lower(), 9))
-top = diagnoses[0]
+records.sort(key=lambda d: RANK.get(str(d.get("severity", "")).lower(), 9))
+top = records[0]
 
 entity = top.get("entity") or {}
 labels = entity.get("labels") or {}
-diagnosis_id = top.get("id")
+object_id = top.get("id")
 
 cluster = labels.get("k8s.cluster.name") or labels.get("causely.ai/cluster") or ""
 namespace = labels.get("k8s.namespace.name") or labels.get("causely.ai/namespace") or ""
@@ -127,7 +135,7 @@ impacted = [s.get("name") for s in (top.get("impacted_services") or []) if s.get
 description = (top.get("description") or "").strip()
 body = re.sub(r"^#+ .*$", "", description, flags=re.MULTILINE).strip()
 paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
-summary = paragraphs[0] if paragraphs else (top.get("custom_defect_name") or "Causely diagnosis")
+summary = paragraphs[0] if paragraphs else (top.get("custom_defect_name") or "Causely issue")
 details = "\n\n".join(paragraphs[1:])[:2000] or summary
 if impacted:
     details += "\n\nImpacted services: " + ", ".join(impacted)
@@ -148,12 +156,12 @@ if remediation:
 
 fixture = {
     "type": "ProblemDetected",
-    "name": top.get("name") or "Causely diagnosis",
-    "objectId": diagnosis_id,
-    "object_type": "defect",
+    "name": top.get("name") or "Causely issue",
+    "objectId": object_id,
+    "object_type": object_type,
     "severity": top.get("severity") or "High",
     "timestamp": top.get("started_at") or "",
-    "link": f"{app_base}/diagnoses/{diagnosis_id}",
+    "link": f"{app_base}/{'issues' if object_type == 'issue' else 'diagnoses'}/{object_id}",
     "entity": {
         "id": entity.get("id"),
         "name": entity.get("name"),
@@ -174,11 +182,11 @@ with open(sys.argv[2], "w") as handle:
     json.dump(fixture, handle, indent=2)
     handle.write("\n")
 
-print(f"  diagnosis: {top.get('custom_defect_name') or fixture['name']}")
+print(f"  {object_type}: {top.get('custom_defect_name') or fixture['name']}")
 print(f"  severity:  {fixture['severity']}")
 print(f"  entity:    {entity.get('name')} ({cluster}/{namespace})")
-print(f"  objectId:  {diagnosis_id}")
-print(f"  {len(diagnoses)} active diagnosis/es available")
+print(f"  objectId:  {object_id}")
+print(f"  {len(records)} active {object_type}(s) available")
 PY
 
 echo

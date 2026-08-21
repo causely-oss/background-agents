@@ -5,10 +5,17 @@ while the DevOps Agent webhook accepts only its own incident schema. This functi
 bridges the two: it authenticates the inbound call, translates the payload, and
 re-signs the result with the HMAC scheme the agent webhook requires.
 
-Causely's diagnosis id (``objectId``) and portal link are deliberately carried
-through into ``data``. That is the hinge of the integration — it lets the agent call
-Causely's ``get_diagnosis_details`` and inherit the causal chain instead of
-re-deriving root cause from raw telemetry.
+Causely's object id (``objectId``) and portal link are deliberately carried through
+into ``data``. That is the hinge of the integration — it lets the agent call back
+into Causely for the causal chain instead of re-deriving root cause from raw
+telemetry.
+
+Configure the notification to send **Issues** rather than defects. An Issue groups
+the related diagnoses for an affected entity into a single incident with a
+designated primary diagnosis, which is the right granularity for one investigation;
+a defect is one finding beneath it. The relay handles either — ``object_type`` on
+the payload selects which Causely tool the agent is pointed at — but issue-level
+notifications are what you want feeding an agent.
 
 Only the standard library plus boto3 (present in the Lambda runtime) is used, so
 there is nothing to vendor into the deployment package.
@@ -56,6 +63,35 @@ TYPE_TO_ACTION = {
     "problemdetected": "created",
     "problemcleared": "resolved",
 }
+
+# Causely's object_type decides which MCP tool resolves objectId into a causal
+# chain: an Issue is the incident-level view (a group of diagnoses with a primary
+# one), a defect is a single diagnosis beneath it. Sending Issues is preferred, so
+# an absent or unrecognised object_type is treated as one.
+OBJECT_TYPE_TOOL = {
+    "issue": ("get_issue_details", "issue_id"),
+    "defect": ("get_diagnosis_details", "diagnosis_id"),
+}
+DEFAULT_OBJECT_TYPE = "issue"
+
+
+def _investigation_hint(object_type: str, object_id: str) -> str:
+    """Name the exact Causely tool call that turns objectId into a causal chain."""
+    normalised = str(object_type or "").lower()
+    tool, parameter = OBJECT_TYPE_TOOL.get(normalised, OBJECT_TYPE_TOOL[DEFAULT_OBJECT_TYPE])
+    hint = (
+        "Causely has already identified the root cause. Call the Causely MCP tool "
+        f"{tool} with {parameter} '{object_id}' to retrieve the full causal chain, "
+        "affected entities, and blast radius before proposing a fix."
+    )
+    if normalised not in OBJECT_TYPE_TOOL:
+        # Do not silently guess: say what was assumed and what to try instead.
+        other_tool, other_parameter = OBJECT_TYPE_TOOL["defect"]
+        hint += (
+            f" If that returns nothing, the id may be a diagnosis rather than an "
+            f"Issue — retry with {other_tool} and {other_parameter}."
+        )
+    return hint
 
 
 def _now_iso() -> str:
@@ -164,22 +200,24 @@ def to_incident(causely: dict) -> dict:
     entity = causely.get("entity") or {}
     labels = causely.get("labels") or {}
 
-    name = causely.get("name") or "Causely diagnosis"
+    name = causely.get("name") or "Causely issue"
     entity_name = entity.get("name")
-    diagnosis_id = causely.get("objectId")
+    object_id = causely.get("objectId")
+    object_type = causely.get("object_type")
 
     cluster = labels.get("k8s.cluster.name") or labels.get("causely.ai/cluster")
     namespace = labels.get("k8s.namespace.name") or labels.get("causely.ai/namespace")
 
     context = {
         "source": "causely",
-        # These two fields are what let the agent go back to Causely for the
-        # causal chain rather than starting the investigation cold.
-        "causelyDiagnosisId": diagnosis_id,
-        "causelyDiagnosisName": name,
+        # These three fields are what let the agent go back to Causely for the
+        # causal chain rather than starting the investigation cold: the id, and
+        # the object type that says which tool resolves it.
+        "causelyObjectId": object_id,
+        "causelyObjectType": object_type,
+        "causelyObjectName": name,
         "causelyLink": causely.get("link"),
         "causelyEventType": causely.get("type"),
-        "causelyObjectType": causely.get("object_type"),
         "entityId": entity.get("id"),
         "entityName": entity_name,
         "entityType": entity.get("type"),
@@ -188,16 +226,12 @@ def to_incident(causely: dict) -> dict:
         "namespace": namespace,
         "controllerKind": labels.get("k8s.controller.kind"),
     }
-    if diagnosis_id:
-        context["investigationHint"] = (
-            "Causely has already identified the root cause. Call the Causely MCP tool "
-            f"get_diagnosis_details with objectId '{diagnosis_id}' to retrieve the full "
-            "causal chain, affected entities, and blast radius before proposing a fix."
-        )
+    if object_id:
+        context["investigationHint"] = _investigation_hint(object_type, object_id)
 
     incident = {
         "eventType": "incident",
-        "incidentId": diagnosis_id or f"causely-{name}",
+        "incidentId": object_id or f"causely-{name}",
         "action": TYPE_TO_ACTION.get(str(causely.get("type") or "").lower(), "updated"),
         "priority": SEVERITY_TO_PRIORITY.get(str(causely.get("severity") or "").lower(), "MEDIUM"),
         "title": f"{name} on {entity_name}" if entity_name else name,

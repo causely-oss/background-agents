@@ -2,10 +2,10 @@
   "type": "ProblemDetected",
   "name": "Service Malfunction",
   "objectId": "9591a6d6-4171-4613-8941-7472aaa4175e",
-  "object_type": "defect",
+  "object_type": "issue",
   "severity": "Critical",
   "timestamp": "2026-08-05T13:57:16.000Z",
-  "link": "https://app.causely.app/diagnoses/9591a6d6-4171-4613-8941-7472aaa4175e",
+  "link": "https://app.causely.app/issues/9591a6d6-4171-4613-8941-7472aaa4175e",
   "entity": {
     "id": "db9c9c49-8ad4-5bb2-a3e5-6d53b2ac1991",
     "name": "tracey-shop/tracey-shop-payment-gw",

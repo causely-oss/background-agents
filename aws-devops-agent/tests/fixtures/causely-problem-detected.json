@@ -2,10 +2,10 @@
   "type": "ProblemDetected",
   "name": "MemoryLeak",
   "objectId": "d3f8a1c2-4b6e-4f19-9c07-5ae2b1d84f30",
-  "object_type": "defect",
+  "object_type": "issue",
   "severity": "Critical",
   "timestamp": "2026-08-05T18:42:11.482Z",
-  "link": "https://app.causely.app/diagnoses/d3f8a1c2-4b6e-4f19-9c07-5ae2b1d84f30",
+  "link": "https://app.causely.app/issues/d3f8a1c2-4b6e-4f19-9c07-5ae2b1d84f30",
   "entity": {
     "id": "7c1e9b04-2a55-4d83-b6f1-90cc7e2a1188",
     "name": "checkout",
@@ -13,11 +13,11 @@
     "link": "https://app.causely.app/topology/7c1e9b04-2a55-4d83-b6f1-90cc7e2a1188"
   },
   "labels": {
-    "k8s.cluster.name": "chaos",
+    "k8s.cluster.name": "demo-cluster",
     "k8s.cluster.uid": "1f0a6c33-8e21-4a7f-90bd-0c5b2ee41a77",
     "k8s.namespace.name": "checkout",
     "k8s.controller.kind": "Deployment",
-    "causely.ai/cluster": "chaos",
+    "causely.ai/cluster": "demo-cluster",
     "causely.ai/namespace": "checkout"
   },
   "description": {

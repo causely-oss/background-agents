@@ -1,7 +1,7 @@
 # Deploying AWS DevOps Agent with Causely as its causal layer
 
 A from-scratch walkthrough: an Agent Space, Causely registered as an MCP capability provider, and a
-signed-webhook relay so a Causely diagnosis can start an investigation with nobody watching.
+signed-webhook relay so a Causely Issue can start an investigation with nobody watching.
 
 If you already have all of this and just want to see what the flows look like, skip to
 [`WALKTHROUGH.md`](WALKTHROUGH.md).
@@ -16,7 +16,7 @@ If you already have all of this and just want to see what the flows look like, s
                                               │
                                               ▼
                                         investigation
-                                          ├─ Causely MCP: get_diagnosis_details(objectId)
+                                          ├─ Causely MCP: get_issue_details(issue_id)
                                           ├─ use_kubectl / use_aws (read-only)
                                           └─ Root Cause + mitigation plan ──> Slack
 ```
@@ -164,8 +164,8 @@ surface; keeping the Causely credentials read-only is the other half of that mit
 The script asks the server what it advertises via `tools/list` first and intersects that with the
 desired list, so a renamed or retired tool surfaces as a warning rather than a silent gap later.
 
-- [ ] Note that tools reach the agent **prefixed with the server name**: `get_diagnosis_details`
-      appears as `Causely_get_diagnosis_details`. The 64-character tool-name limit applies to the
+- [ ] Note that tools reach the agent **prefixed with the server name**: `get_issue_details`
+      appears as `Causely_get_issue_details`. The 64-character tool-name limit applies to the
       prefixed form, so keep `MCP_NAME` short.
 
 Re-running with an edited `DESIRED_TOOLS` updates the allowlist in place. Rotating credentials does
@@ -242,6 +242,17 @@ Either route works. The UI is simpler; the Secret is reproducible.
   kubectl apply -f examples/causely-notification-secret.yaml
   ```
 
+- [ ] **Set the object type to Issue.** This is the one setting that decides what the agent is
+      handed. An Issue groups the related diagnoses for an affected entity into a single incident
+      with a designated primary diagnosis — one investigation per real problem. Defect-level
+      notifications fire per finding instead, so a single incident can wake the agent several times
+      over, each with a partial view. The selector lives in the notification's create/edit modal
+      alongside the other filters.
+
+      The relay handles either: `object_type` on the payload picks the tool named in the
+      `investigationHint`, `get_issue_details` or `get_diagnosis_details`. It assumes Issue when the
+      field is missing, and says so in the hint rather than guessing silently.
+
 - [ ] Set a severity filter. Every notification starts a billable investigation, so restrict to what
       is worth waking an agent for:
 
@@ -280,16 +291,16 @@ Three rungs, in this order, so a failure tells you *where* the problem is:
 
   This one sends a knowingly wrong token first and aborts unless it gets a 401.
 
-- [ ] **Then with a real diagnosis**, which is the only version that proves anything:
+- [ ] **Then with a real Issue**, which is the only version that proves anything:
 
   ```bash
   scripts/make-fixture.sh
   tests/send-test-notification.sh tests/fixtures/causely-live.json
   ```
 
-  `make-fixture.sh` fetches the most severe currently-active diagnosis and writes a fixture with its
-  real `objectId`, so `get_diagnosis_details` returns an actual causal chain. Re-run it shortly
-  before you need it; diagnoses resolve.
+  `make-fixture.sh` fetches the most severe currently-active Issue and writes a fixture with its
+  real `objectId`, so `get_issue_details` returns an actual causal chain. Re-run it shortly before
+  you need it; issues resolve.
 
 - [ ] **Confirm Causely was actually consulted** — do not take the investigation's prose for it:
 

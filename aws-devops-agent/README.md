@@ -3,16 +3,16 @@
 [AWS DevOps Agent](https://aws.amazon.com/devops-agent/) is Amazon's managed agentic SRE service:
 you create an *Agent Space*, associate an AWS account with it, and the service discovers your
 topology and runs autonomous investigations — in its own cloud, on its own model, billed by
-agent-second. It accepts remote MCP servers as capability providers, which is the whole opening
-here. Point it at Causely and it stops re-deriving root cause from CloudWatch metrics and starts
-reading a causal chain that has already been computed.
+agent-second. It accepts remote MCP servers as capability providers. Point it at Causely and it
+stops re-deriving root cause from CloudWatch metrics and starts reading a causal chain that has
+already been computed.
 
 This example wires the two together in both directions:
 
-- **Proactive** — Causely detects a root cause and fires a notification. A small relay translates
-  it into the agent's incident schema, carrying the diagnosis id across, and signs it. The agent
-  opens an investigation, calls back into Causely MCP with that id, walks the causal chain, and
-  produces a root cause and a staged mitigation plan. No human in the loop.
+- **Proactive** — Causely detects a root cause and fires an Issue notification. A small relay
+  translates it into the agent's incident schema, carrying the Issue id across, and signs it. The
+  agent opens an investigation, calls back into Causely MCP with that id, walks the causal chain,
+  and produces a root cause and a staged mitigation plan. No human in the loop.
 - **Reactive** — an engineer asks the agent a plain-language question in its operator web app, and
   the agent reaches into the same Causely MCP tools to answer.
 
@@ -37,7 +37,7 @@ they run.
 | [`scripts/lib.sh`](scripts/lib.sh) | Shared config — every default is env-overridable, and the DevOps Agent CLI namespace is auto-detected |
 | [`scripts/03-causely-mcp.sh`](scripts/03-causely-mcp.sh) | Registers Causely MCP and attaches it with the read-only tool allowlist (`DESIRED_TOOLS` at the top) |
 | [`lambda/causely_relay/handler.py`](lambda/causely_relay/handler.py) | The relay: authenticate, translate, HMAC-sign, forward. Stdlib and boto3 only, nothing vendored |
-| [`tests/test_transform.py`](tests/test_transform.py) | 27 unit tests over the translation and signing. No AWS needed |
+| [`tests/test_transform.py`](tests/test_transform.py) | 29 unit tests over the translation and signing. No AWS needed |
 | [`tests/fixtures/`](tests/fixtures) | Causely notification payloads for exercising the relay |
 | [`examples/causely-notification-secret.yaml`](examples/causely-notification-secret.yaml) | The Causely side of the trigger, as an applyable Mediator Secret |
 | [`scripts/show-tool-calls.sh`](scripts/show-tool-calls.sh) | Which tools an investigation actually used — the honest check that Causely was consulted |
@@ -56,7 +56,7 @@ PROACTIVE
     │  x-amzn-event-signature
     ▼
   DevOps Agent webhook ──> investigation
-                            └─> Causely MCP get_diagnosis_details(objectId)
+                            └─> Causely MCP get_issue_details(issue_id)
                             └─> Root Cause tab + mitigation plan ──> Slack
 
 REACTIVE
@@ -65,10 +65,11 @@ REACTIVE
 
 The relay exists because Causely forwards its own notification payload verbatim with no templating,
 while the agent webhook accepts only its own `eventType: incident` schema. Neither side can produce
-the other's shape, so a small translation step is unavoidable. It earns its keep by doing one thing
-beyond reformatting — it carries Causely's `objectId` through into the incident's `data`, along with
-an `investigationHint` telling the agent to call `get_diagnosis_details` with it. That single string
-is what turns a generic alert into an investigation that starts from a known cause.
+the other's shape, so a small translation step is unavoidable. Beyond reformatting, it carries
+Causely's `objectId` and `object_type` through into the incident's `data`, along with an
+`investigationHint` naming the exact tool that resolves them — `get_issue_details` for an Issue,
+`get_diagnosis_details` for a single defect. That one string is what turns a generic alert into an
+investigation that starts from a known cause.
 
 ## Quickstart
 
@@ -99,10 +100,15 @@ installs: Slack and GitHub.
 it straight to Secrets Manager. If it is lost the only recovery is to disassociate and mint a new
 webhook.
 
-**Use a real diagnosis, not the synthetic fixture.** `tests/fixtures/causely-problem-detected.json`
+**Send Issues, not defects.** An Issue groups the related diagnoses for an affected entity into one
+incident with a designated primary diagnosis — the right granularity for a single investigation. A
+defect is one finding beneath it. Set the object type on the notification accordingly; the relay
+handles either, and `object_type` on the payload decides which Causely tool it points the agent at.
+
+**Use a real Issue, not the synthetic fixture.** `tests/fixtures/causely-problem-detected.json`
 describes a problem your tenant does not have, so the agent queries Causely, finds nothing, and
 concludes at length that the alert cannot be corroborated. That is the agent behaving correctly and
-telling you nothing. `scripts/make-fixture.sh` builds a fixture from a live diagnosis instead.
+telling you nothing. `scripts/make-fixture.sh` builds a fixture from a live Issue instead.
 
 ## What the agent is allowed to do
 
@@ -124,9 +130,9 @@ or retired Causely tool shows up as a warning instead of a silent gap. Second, A
 MCP output is a prompt-injection surface; an allowlist alone is half a mitigation, and keeping the
 Causely credentials themselves read-only is the other half.
 
-Tools reach the agent **prefixed with the MCP server name** — `get_diagnosis_details` arrives as
-`Causely_get_diagnosis_details`. The 64-character tool-name limit applies to the prefixed form, so
-a long `MCP_NAME` eats into that budget.
+Tools reach the agent **prefixed with the MCP server name** — `get_issue_details` arrives as
+`Causely_get_issue_details`. The 64-character tool-name limit applies to the prefixed form, so a
+long `MCP_NAME` eats into that budget.
 
 ## Verify
 
@@ -164,7 +170,7 @@ $4. New accounts get a two-month trial covering 10 agent spaces and 20 hours of 
 month. Do not leave a webhook firing in a loop unattended.
 
 The severity filter in the notification config is the practical cost guardrail — without it a noisy
-afternoon of Low-severity diagnoses becomes a noisy AWS bill:
+afternoon of Low-severity issues becomes a noisy AWS bill:
 
 ```yaml
 notif_config_filters_enabled: "true"

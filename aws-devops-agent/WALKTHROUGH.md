@@ -3,12 +3,12 @@
 Setup lives in [`DEPLOYMENT.md`](DEPLOYMENT.md). This page is what you actually see once it runs,
 and what to check when a run looks right but isn't.
 
-The single idea worth watching for: the agent is not guessing. Causely has already computed the
-causal chain, and the agent's job is to act on it rather than re-derive it from raw telemetry.
+The core idea: the agent is not guessing. Causely has already computed the causal chain, and the
+agent's job is to act on it rather than re-derive it from raw telemetry.
 
 ## What a real run produced
 
-A notification built from a live Causely diagnosis — a Critical payment-gateway failure — produced
+A notification built from a live Causely Issue — a Critical payment-gateway failure — produced
 an investigation that made **15 Causely MCP calls across 10 tools**, traced the cascade
 `payment-gw → checkout-api → storefront-bff → web-client`, and identified the root cause as a Helm
 deploy that switched a dependency into a rejection mode.
@@ -31,16 +31,16 @@ registered services, the relay deployed with `DRY_RUN: false`, and an aggregator
 
 Then two checks that catch the failure modes which look like success:
 
-- [ ] **Causely has a live diagnosis.** Run `scripts/make-fixture.sh` — it prints the one it chose.
+- [ ] **Causely has a live Issue.** Run `scripts/make-fixture.sh` — it prints the one it chose.
       If it reports none active, the proactive flow has nothing real to fire on.
 
-      **Do not skip this.** A stale or synthetic diagnosis id is the one failure that looks like a
+      **Do not skip this.** A stale or synthetic object id is the one failure that looks like a
       working system and isn't: the agent queries Causely, finds no such problem, and concludes —
       correctly, and at length — that the alert cannot be corroborated. Impressive reasoning,
       useless result.
 
 - [ ] **MCP is genuinely wired.** In the operator web app chat, ask *"List the current Causely
-      diagnoses."* and confirm the transcript shows a Causely MCP tool call. If this fails, both
+      issues."* and confirm the transcript shows a Causely MCP tool call. If this fails, both
       flows are hollow — fix it before going further.
 
       Chat cannot be driven from a shell: `SendMessage` is an event-stream operation and the AWS CLI
@@ -51,11 +51,12 @@ Then two checks that catch the failure modes which look like success:
 Nobody is watching. Causely notices something and an agent picks up the work before an engineer is
 involved.
 
-**1. Start in Causely.** Look at the active diagnosis — the root cause, the affected entity, the
-blast radius. This is the causal analysis the agent gets to start from rather than reproduce.
+**1. Start in Causely.** Look at the active Issue — its primary diagnosis, the affected entity, and
+the blast radius across the diagnoses grouped beneath it. This is the causal analysis the agent gets
+to start from rather than reproduce.
 
 **2. Fire the notification.** Causely → Settings → Notifications → **Send Test Notification** is the
-honest version, since nothing is staged. To send a specific diagnosis through the relay instead:
+honest version, since nothing is staged. To send a specific Issue through the relay instead:
 
 ```bash
 tests/send-test-notification.sh tests/fixtures/causely-live.json --fresh
@@ -67,7 +68,7 @@ opening a new one.
 
 **3. Watch the investigation open.** In the web app a new investigation appears, its priority
 reflecting Causely's severity. Open the timeline and watch the Causely MCP tool calls land — they
-appear prefixed with the server name, e.g. `Causely_get_diagnosis_details`. That call is the whole
+appear prefixed with the server name, e.g. `Causely_get_issue_details`. That call is the whole
 point: the agent is calling back into Causely with the id from the notification, picking up the
 causal chain rather than re-deriving one from metrics.
 
@@ -99,7 +100,7 @@ service name — the point is that the engineer does not already know where to l
 > about it?"*
 
 **2. Watch the tool calls.** Typically `name_lookup`, `get_service_summary`, `get_symptoms`,
-`get_diagnosis_details`, `get_topology` — resolve the service, check its health, pull the symptoms,
+`get_issue_details`, `get_topology` — resolve the service, check its health, pull the symptoms,
 then ask Causely for the causal chain. What it is not doing is paging through dashboards hoping to
 spot a correlation.
 
@@ -134,7 +135,7 @@ rely on either flow; tool selection left to chance is not a property you want in
 | Investigation runs but never calls Causely | Tools not allowlisted, or MCP auth expired | Agent Space → Capabilities → MCP Servers |
 | MCP calls fail mid-investigation | OAuth credentials rotated | No in-place update — deregister and re-register |
 | Agent answers from CloudWatch only | No reason to prefer Causely | Add the custom skill, above |
-| Agent says the alert cannot be corroborated | Synthetic or resolved diagnosis | `scripts/make-fixture.sh`, then re-send |
+| Agent says the alert cannot be corroborated | Synthetic or resolved Issue | `scripts/make-fixture.sh`, then re-send |
 | Causely has no active problems | Quiet tenant | `tests/send-test-notification.sh` with a bundled fixture, accepting the caveat above |
 
 ## Afterwards
