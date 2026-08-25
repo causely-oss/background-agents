@@ -1,0 +1,13 @@
+# Resolved resource ids and, notably, the Causely notification bearer token.
+.state/
+
+# Lambda build output
+.build/
+*.zip
+
+# Scratch policy documents, in case anything is written out by hand
+*-policy.json
+!tests/fixtures/*.json
+
+__pycache__/
+*.pyc
