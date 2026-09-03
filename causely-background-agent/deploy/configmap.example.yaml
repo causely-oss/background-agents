@@ -1,0 +1,59 @@
+# Example non-secret config for causely-background-agent. Copy to configmap.yaml, edit,
+# and kubectl apply -f it — it is NOT applied automatically by deployment.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: causely-background-agent
+data:
+  config.yaml: |
+    port: "8090"
+
+    # Causely's MCP endpoint. Point this at your own tenant's MCP server —
+    # e.g. https://api.causely.app/mcp for Causely's hosted offering, or an
+    # in-cluster address if you're running Causely yourself.
+    causely_mcp_url: "https://api.causely.app/mcp"
+
+    # The one "org/repo" this instance is allowed to read from / open PRs against.
+    github_repo: "your-org/your-repo"
+
+    # Optional allowlist of entity namespaces this instance will act on. If
+    # unset, it accepts triggers for any namespace unless a causely.ai/github-repo
+    # label on the entity says otherwise (see scope.go).
+    scope_namespaces: []
+
+    max_cost_usd: 5
+    max_weekly_cost_usd: 50
+
+    # Weekly spend is tracked in memory unless this is set, in which case it's
+    # persisted here across restarts. If you set this, also mount a volume at
+    # its directory in deployment.yaml (a small emptyDir is fine for a single
+    # replica, or a PVC for real cross-restart durability).
+    cost_state_file: "/data/weekly-cost.json"
+
+    # observe (default): run investigations and record what would happen, but
+    # never open a real PR or post to Slack. act: do it for real. Start on
+    # observe until you trust the configuration.
+    action_mode: "observe"
+
+    # Appends one JSON-lines InvestigationRecord per run — the dataset behind
+    # "how well is this actually working." See investigation_record.go.
+    investigation_record_path: "/data/investigations.jsonl"
+
+    # Poll is an alternative/additional trigger source to the push webhook: on
+    # an interval, ask Causely for open issues directly instead of waiting for
+    # a one-time webhook fire. Useful because a webhook only reflects an
+    # issue's state at detection time, and issues evolve.
+    poll:
+      enabled: false
+      interval: "5m"
+      state_file: "/data/poll-watermark.json"
+      # entity_namespace / github_repo_label: applied to every issue this poll
+      # loop fetches, since there's no mediator forwarding entity labels here.
+      entity_namespace: ""
+      github_repo_label: ""
+
+    # Additional MCP servers beyond the built-in Causely one, e.g. Grafana:
+    # mcp_servers:
+    #   - name: grafana
+    #     url: https://grafana.example.com/mcp
+    #     description: "dashboards and metrics"

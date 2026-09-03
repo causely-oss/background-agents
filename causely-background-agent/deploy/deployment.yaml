@@ -1,0 +1,85 @@
+# Deployment + Service for causely-background-agent. Requires:
+#   - a ConfigMap named causely-background-agent (see configmap.example.yaml)
+#   - a Secret named causely-background-agent with keys: anthropic-api-key, github-token,
+#     slack-bot-token, slack-signing-secret (optional), causely-mcp-token
+#     (optional), trigger-shared-secret (optional but strongly recommended —
+#     see README.md). Create it out-of-band, e.g.:
+#       kubectl create secret generic causely-background-agent \
+#         --from-literal=anthropic-api-key=... \
+#         --from-literal=github-token=... \
+#         --from-literal=slack-bot-token=... \
+#         --from-literal=trigger-shared-secret=$(openssl rand -hex 32)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: causely-background-agent
+  labels:
+    app: causely-background-agent
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single replica + a local data volume; avoid two pods racing on it
+  selector:
+    matchLabels:
+      app: causely-background-agent
+  template:
+    metadata:
+      labels:
+        app: causely-background-agent
+    spec:
+      containers:
+        - name: causely-background-agent
+          image: docker.io/causely/causely-background-agent:latest
+          command: ["/bin/causely-background-agent"]
+          args: ["-config", "/config/config.yaml"]
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: anthropic-api-key } }
+            - name: GITHUB_TOKEN
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: github-token } }
+            - name: SLACK_BOT_TOKEN
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: slack-bot-token } }
+            - name: SLACK_SIGNING_SECRET
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: slack-signing-secret, optional: true } }
+            - name: CAUSELY_MCP_TOKEN
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-token, optional: true } }
+            - name: TRIGGER_SHARED_SECRET
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: trigger-shared-secret, optional: true } }
+          ports:
+            - name: webserver
+              containerPort: 8090
+          livenessProbe:
+            httpGet: { path: /healthz, port: webserver }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /healthz, port: webserver }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - mountPath: /config
+              name: config
+              readOnly: true
+            - mountPath: /data
+              name: data
+      volumes:
+        - name: config
+          configMap:
+            name: causely-background-agent
+        - name: data
+          emptyDir: {} # swap for a PVC if you need cost/poll state to survive pod recreation, not just container restarts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: causely-background-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: causely-background-agent
+  ports:
+    - name: webserver
+      port: 8090
