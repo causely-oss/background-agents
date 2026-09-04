@@ -6,7 +6,6 @@ call, wiring a Claude Managed Agent up to remote MCP servers. See provided.py
 for the system prompt, tool declarations, and chat UI.
 """
 import os
-import uuid
 
 import anthropic
 import httpx
@@ -22,18 +21,48 @@ K8S_MCP_URL = os.environ.get("K8S_MCP_URL", "")
 GRAFANA_MCP_URL = os.environ.get("GRAFANA_MCP_URL", "")
 CAUSELY_MCP_URL = os.environ.get("CAUSELY_MCP_URL", "")
 
+# Optional — mount a GitHub repo checkout into the agent's sandbox. Leave
+# GITHUB_REPO_URL empty to skip this entirely; GITHUB_BRANCH is optional too
+# (omitted, the session checks out the repo's default branch).
+GITHUB_REPO_URL = os.environ.get("GITHUB_REPO_URL", "")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "")
+GITHUB_MOUNT_PATH = os.environ.get("GITHUB_MOUNT_PATH", "/workspace/repo")
+
+
+AGENT_NAME = "SRE Agent"
+ENVIRONMENT_NAME = "sre-agent"
+
 
 # ── 1. Agent ──────────────────────────────────────────────────────────────
 # What the agent IS: model, system prompt, tools, and the remote MCP servers
-# it's allowed to call. Create once, reuse forever.
+# it's allowed to call. Create once, reuse forever — found by name rather
+# than just cached client-side, so a second process (e.g. webhook.py running
+# alongside app.py) converges on the SAME cloud agent instead of minting a
+# duplicate. If one already exists, its config is synced to the current
+# SYSTEM_PROMPT/TOOLS/mcp_servers on every fetch, so a still-running process
+# never serves a stale tool set after you add a server and restart.
 @st.cache_resource
 def setup_agent() -> str:
-    agent = client.beta.agents.create(
-        name="SRE Agent", model="claude-opus-4-7", system=SYSTEM_PROMPT,
-        tools=TOOLS,
-        mcp_servers=_mcp_servers(),
+    existing = _find_by_name(client.beta.agents.list(limit=100).data, AGENT_NAME)
+    if existing is not None:
+        updated = client.beta.agents.update(
+            existing.id, version=existing.version,
+            system=SYSTEM_PROMPT, tools=TOOLS, mcp_servers=_mcp_servers(),
+        )
+        return updated.id
+    created = client.beta.agents.create(
+        name=AGENT_NAME, model="claude-opus-4-7", system=SYSTEM_PROMPT,
+        tools=TOOLS, mcp_servers=_mcp_servers(),
     )
-    return agent.id
+    return created.id
+
+
+def _find_by_name(items, name: str):
+    for item in items:
+        if item.name == name:
+            return item
+    return None
 
 
 def _mcp_servers() -> list[dict]:
@@ -107,14 +136,20 @@ def _fetch_causely_access_token() -> str:
 
 
 # ── 3. Environment ────────────────────────────────────────────────────────
-# Where the agent's container runs. Create once, reuse forever.
+# Where the agent's container runs. Create once, reuse forever — same
+# find-by-name-before-create pattern as setup_agent(), for the same reason:
+# a fixed name lets every process land on one shared environment instead of
+# each restart (or each separate process) minting a new container.
 @st.cache_resource
 def setup_environment() -> str:
-    env = client.beta.environments.create(
-        name=f"sre-agent-{uuid.uuid4().hex[:6]}",
+    existing = _find_by_name(client.beta.environments.list(limit=100).data, ENVIRONMENT_NAME)
+    if existing is not None:
+        return existing.id
+    created = client.beta.environments.create(
+        name=ENVIRONMENT_NAME,
         config={"type": "cloud", "networking": {"type": "unrestricted"}},
     )
-    return env.id
+    return created.id
 
 
 # ── 4. Session ────────────────────────────────────────────────────────────
@@ -122,13 +157,39 @@ def setup_environment() -> str:
 # session (not cached) because the Causely token inside it is a short-lived
 # Frontegg JWT — baking it into a long-lived cached resource would leave the
 # session working for an hour and then silently 401ing.
+#
+# `resources` is separate from `mcp_servers`/vaults above: instead of giving
+# the agent tools to call a remote service, it checks a GitHub repo out
+# straight into the sandbox filesystem at `mount_path`, on the branch named
+# by `checkout` (or the repo's default branch if GITHUB_BRANCH is unset).
 def start_session(agent_id: str, env_id: str) -> str:
+    kwargs = {}
+    if GITHUB_REPO_URL:
+        kwargs["resources"] = [_github_repository_resource()]
     session = client.beta.sessions.create(
         agent=agent_id,
         environment_id=env_id,
         vault_ids=[setup_vault()],
+        **kwargs,
     )
     return session.id
+
+
+def _github_repository_resource() -> dict:
+    # The API wants https://github.com/{owner}/{repo} exactly — no .git suffix
+    # — but that's the form git clone URLs and GitHub's own "Copy" button use,
+    # so strip it here rather than trip up everyone who pastes one into .env.
+    url = GITHUB_REPO_URL.removesuffix(".git")
+    resource = {
+        "type": "github_repository",
+        "url": url,
+        "mount_path": GITHUB_MOUNT_PATH,
+    }
+    if GITHUB_TOKEN:
+        resource["authorization_token"] = GITHUB_TOKEN
+    if GITHUB_BRANCH:
+        resource["checkout"] = {"type": "branch", "name": GITHUB_BRANCH}
+    return resource
 
 
 # ── 5. Stream loop ────────────────────────────────────────────────────────

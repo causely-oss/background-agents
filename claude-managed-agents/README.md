@@ -55,7 +55,11 @@ cp .env.example .env               # fill in ANTHROPIC_API_KEY
 ./scripts/run-k8s-mcp.sh           # runs the k8s MCP server + cloudflared tunnel
 ```
 
-Copy the printed `K8S_MCP_URL` into `.env`, then:
+Copy the printed `K8S_MCP_URL` into `.env`. The agent is scoped to a single
+namespace via `K8S_NAMESPACE` (default `scenario-01`, matching a real target
+cluster) — the `kind/setup.sh` demo workload above lives in `demo`, so for
+that local walkthrough set `K8S_NAMESPACE=demo` instead (or `""` to lift the
+restriction entirely). Then:
 
 ```bash
 streamlit run app.py
@@ -66,8 +70,7 @@ agent.
 
 Start a new session by clicking the '+' sign. 
 
-Try: *"list the namespaces and pods you can see, then point out
-anything that looks unhealthy."*
+Try: *"point out anything that looks unhealthy."*
 
 You can review logs from the session including how long the response took and how many tokens were used under [Managed Agents -> Sessions](https://platform.claude.com/).
 
@@ -138,6 +141,38 @@ Restart Streamlit and try:
 With Causely wired in, the agent calls `get_diagnoses` first and returns its
 diagnosis directly.
 
+### Add a GitHub repo checkout
+
+This one's a different shape from Grafana/Causely: instead of a remote MCP
+server the agent calls tools on, it's a repo checked out straight into the
+agent's sandbox filesystem, so the agent can read (and, with its shell/file
+tools, edit) real source rather than just cluster state. It's wired through
+`resources` on `sessions.create`, not `mcp_servers` — see
+`_github_repository_resource()` and `start_session()` in `agent.py`.
+
+Set in `.env`:
+
+```bash
+GITHUB_REPO_URL=https://github.com/org/repo
+GITHUB_TOKEN=<a PAT with repo read access — omit for public repos>
+GITHUB_BRANCH=fix/issue-1234        # omit to use the repo's default branch
+GITHUB_MOUNT_PATH=/workspace/repo   # default; where it lands in the sandbox
+```
+
+Unlike the MCP servers, this is read per-session rather than cached — restart
+Streamlit after changing these and start a **new** session (existing
+sessions keep whatever was mounted when they were created).
+
+### Trigger investigations from Causely
+
+The three additions above all make the agent *better at answering questions
+you ask it*. This one is the other direction: Causely pushes a notification
+and the agent starts investigating on its own, with nobody watching. A
+separate always-on process (`webhook.py`) receives it — see
+[docs/causely-webhook.md](docs/causely-webhook.md) for setup, and for why
+that has to be a process you host (the Managed Agents API has no native
+inbound-webhook trigger).
+
 ## Want a more realistic scenario?
 
 The `kind/` demo here is intentionally minimal — three pods, one deliberately
@@ -155,11 +190,17 @@ Four resources, created in this order:
 **Agent → Environment → Session → Events**
 
 - **Agent** — the model, system prompt, and tools (including which MCP
-  servers it can call). Created once, reused forever.
-- **Environment** — where the agent's container runs.
+  servers it can call). Created once, reused forever — `setup_agent()` finds
+  it by name before creating, so every process that imports `agent.py`
+  (`app.py`, `webhook.py`, a one-off script) converges on the same cloud
+  agent instead of each minting its own.
+- **Environment** — where the agent's container runs. Same find-by-name
+  reuse as the agent.
 - **Session** — one conversation, bound to an agent + environment (+ a vault
-  of MCP credentials). Sessions are real cloud resources, listed with
-  `sessions.list()` and replayed with `events.list()` — no local database.
+  of MCP credentials, + optionally a GitHub repo checkout mounted into the
+  sandbox — see [Add a GitHub repo checkout](#add-a-github-repo-checkout)).
+  Sessions are real cloud resources, listed with `sessions.list()` and
+  replayed with `events.list()` — no local database.
 - **Events** — the message/tool-call stream for a session, opened with
   `sessions.events.stream()` and appended to with `sessions.events.send()`.
 
@@ -209,9 +250,11 @@ e2e.py               ← headless smoke test of the k8s MCP path
 app.py               ← Streamlit entry point
 ui.py, assets/       ← styling
 
+webhook.py           ← Causely notification -> agent investigation (optional)
+
 kind/                ← kind cluster config + demo workload + setup/teardown
-scripts/             ← run-k8s-mcp.sh: local MCP server + cloudflared tunnel
-docs/                ← auth.md, grafana.md, mcp-tunnels.md
+scripts/             ← run-k8s-mcp.sh, run-webhook.sh: local servers + cloudflared tunnels
+docs/                ← auth.md, grafana.md, mcp-tunnels.md, causely-webhook.md
 ```
 
 ## License
