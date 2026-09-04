@@ -80,3 +80,144 @@ h5:has(+ *) { /* chat panel header */
   margin-bottom: 12px;
   color: var(--accent);
 }
+
+/* ── available tools strip ─────────────────────────────────────────────── */
+/* the "##### AVAILABLE TOOLS" heading itself matches AGENT's size for free
+   (same h5 markdown + the shared h5:has(+ *) rule above); nothing extra
+   needed here for that part. */
+.tools-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 6px 0 12px;
+}
+.tool-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 13px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.tool-chip--active {
+  border-color: var(--accent);
+  border-width: 1.5px;
+  color: var(--text);
+  background: var(--surface-2);
+}
+.chip-icon {
+  display: inline-flex;
+  color: var(--accent);
+}
+
+/* ── per-message header row: label (left) + timestamp (right) ─────────── */
+.msg-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 0 4px 3px 4px;
+}
+.msg-label {
+  font-family: 'Chakra Petch', sans-serif;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.msg-ts {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Causely notification: "something happened to us" — recessed panel,
+   accent left border, distinct from a message the agent itself wrote. */
+[class*="st-key-m"][class*="__kind-notification"] {
+  background: var(--bg);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 4px 4px 4px 10px;
+  margin-bottom: 6px;
+}
+[class*="st-key-m"][class*="__kind-notification"] .msg-label {
+  color: var(--accent);
+}
+[class*="st-key-m"][class*="__kind-notification"] [data-testid="stChatMessage"] {
+  background: var(--surface-2);
+}
+
+/* Agent response: "the agent concluded this" — full width, primary weight. */
+[class*="st-key-m"][class*="__kind-agent"] [data-testid="stChatMessage"] {
+  font-weight: 500;
+}
+
+/* User message: stays visually minimal, distinct from both. */
+[class*="st-key-m"][class*="__kind-user"] [data-testid="stChatMessage"] {
+  background: transparent;
+  border-color: transparent;
+  padding-left: 4px;
+}
+[class*="st-key-m"][class*="__kind-user"] .msg-head {
+  opacity: 0.75;
+}
+
+/* ── full-viewport layout: header (natural height) / message pane
+   (flex:1, scrolls) / composer (already sticky-bottom via Streamlit's own
+   stBottom container — untouched here, it's already fixed/sticky by
+   default). Fixes the old fixed-height, overflow-hidden message box that
+   clipped long responses.
+   Streamlit's `.stMain` (data-testid="stAppScrollToBottomContainer") is
+   already a viewport-height, overflow-y:auto flex column by default — that
+   part needs no override. The chain BELOW it (stMainBlockContainer, its
+   root stVerticalBlock, and the stLayoutWrapper that any keyed/sized
+   container like our chat_pane gets wrapped in) all default to
+   content-sized height, so flex:1 on chat_pane alone has nothing to grow
+   into. Each link needs an explicit height:100% to make that a definite
+   size flex-grow can actually distribute; verified against the real DOM
+   (Streamlit 1.58), not guessed test-ids. ─────────────────────────────── */
+[data-testid="stMainBlockContainer"],
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  min-height: 0 !important;
+}
+/* the wrapper Streamlit puts around any key'd/sized element — scoped to
+   the one wrapping chat_pane specifically, since every other keyed
+   container (each per-message block, etc.) gets one too and must NOT be
+   forced full-height. */
+[data-testid="stLayoutWrapper"]:has(.st-key-chat_pane) {
+  display: flex !important;
+  flex-direction: column !important;
+  height: 100% !important;
+  min-height: 0 !important;
+}
+.st-key-chat_pane {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow-y: auto !important;
+}
+.st-key-chat_pane [data-testid="stChatMessage"] {
+  max-height: none; /* never clip a long message mid-sentence */
+}
+
+/* "jump to latest" button — created/positioned by _inject_dynamic_behavior,
+   hidden until the viewer has scrolled away from the bottom. */
+#chat-jump-latest {
+  display: none;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
