@@ -144,6 +144,39 @@ func TestCreatePR_NoExistingPR_OpensNewOne(t *testing.T) {
 	}
 }
 
+// TestCreatePR_SearchNotFoundInCurrentContent guards against the silent no-op
+// commit found dogfooding: fixHasRealChange (agent.go) only checks Claude's
+// *reported* search != replace, which says nothing about whether the file
+// actually contains that search text right now — e.g. it changed since
+// read_file was called, or the string never matched verbatim. applyChange
+// must refuse to commit rather than silently PUT the file back unchanged.
+func TestCreatePR_SearchNotFoundInCurrentContent(t *testing.T) {
+	// newFakeGitHubServer's contents handler defaults to "original content" for
+	// any branch not explicitly seeded — exactly the case here, since CreatePR
+	// creates a fresh, timestamp-suffixed branch name we can't predict.
+	state := &fakeGitHub{fileContent: map[string]string{}}
+	server := newFakeGitHubServer(t, state)
+	defer server.Close()
+
+	client := newTestGitHubClient(server.URL)
+	fix := ProposedFix{
+		PRTitle: "fix: typo",
+		PRBody:  "body",
+		Changes: []FileChange{{Path: "app.py", Search: "text that does not appear in the file", Replace: "fixed"}},
+	}
+
+	_, err := client.CreatePR(fix, "rc-123")
+	if err == nil {
+		t.Fatal("CreatePR() expected an error when the search text isn't found in the current file content, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %v, want it to explain the search text wasn't found", err)
+	}
+	if len(state.commits) != 0 {
+		t.Error("expected no commit (PUT) to have been made")
+	}
+}
+
 func TestCreatePR_ExistingOpenPR_UpdatesInsteadOfDuplicating(t *testing.T) {
 	existingBranch := "causely-fix/rc-123-1700000000"
 	state := &fakeGitHub{

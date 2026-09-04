@@ -279,6 +279,19 @@ func (g *githubClient) applyChange(branch string, change FileChange) error {
 	}
 	_ = json.Unmarshal(raw, &current)
 	decoded, _ := base64.StdEncoding.DecodeString(strings.ReplaceAll(current.Content, "\n", ""))
+
+	// Guard against a silent no-op commit: if change.Search isn't found verbatim in the
+	// file's CURRENT content (as opposed to whatever Claude read earlier via read_file),
+	// strings.Replace below would return the content unchanged and this would still PUT
+	// it — a byte-identical commit with a "fix:" message and no actual diff. This is
+	// exactly the failure mode found dogfooding: fixHasRealChange (agent.go) only checks
+	// that Claude's *reported* search != replace, which says nothing about whether the
+	// file has drifted since read_file was called (a concurrent edit, or simply that the
+	// search text was never quite right). Fail loudly here instead of opening a fix PR
+	// that fixes nothing.
+	if !strings.Contains(string(decoded), change.Search) {
+		return fmt.Errorf("search text not found in %s at its current content on branch %s — the file may have changed since it was read, or the proposed search string doesn't match verbatim; refusing to commit a no-op change", change.Path, branch)
+	}
 	newContent := strings.Replace(string(decoded), change.Search, change.Replace, 1)
 
 	// Commit the change.

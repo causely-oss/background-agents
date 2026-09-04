@@ -76,3 +76,11 @@ func TestPollWatermark_PersistsAndReloads(t *testing.T) {
 		t.Error("reloaded watermark should still know about rc-1@v1 and report unchanged")
 	}
 }
+
+func TestOneLine_CollapsesNewlinesAndWhitespace(t *testing.T) {
+	in := "line one\n\n1. step one\n2. step two\n   indented continuation"
+	want := "line one 1. step one 2. step two indented continuation"
+	if got := oneLine(in); got != want {
+		t.Errorf("oneLine(%q) = %q, want %q", in, got, want)
+	}
+}

@@ -77,7 +77,7 @@ Fields worth knowing:
 - **Provenance**: `trigger_source` (`webhook` | `poll` | `slack_action`), `action_mode`
 - **Cost**: `input_tokens`, `output_tokens`, `cost_usd`
 - **Shape**: `tool_calls` (server + tool name + error flag, per call), `tool_call_count`
-- **Outcome**: `verdict` (`skipped_scope` | `skipped_budget` | `fix_proposed` | `remediation_recommended` | `failed`), `skip_reason`, `summary`, `remediation`, `pr_url`, `error`
+- **Outcome**: `verdict` (`skipped_scope` | `skipped_budget` | `skipped_stale` | `fix_proposed` | `remediation_recommended` | `no_action_needed` | `failed`), `skip_reason`, `summary`, `remediation`, `pr_url`, `error`, `causely_remediation_hint`, `proposed_fix`
 - **Human-filled later**: `correctness_label`, `correctness_notes` — the agent
   never sets these; they exist so a human (or synthetic-bug ground truth) can
   label a run after the fact and turn the JSONL file into an evaluation set.
@@ -249,6 +249,7 @@ exactly the following inputs; everything else below is mechanical.
 | 8 | `SLACK_SIGNING_SECRET` | Verifies `/slack/actions` payloads are really from Slack | Secret, optional but recommended if using the Slack button trigger |
 | 9 | `action_mode` | `observe` or `act` | Config, defaults to `observe` — deploy in `observe` first |
 | 10 | `scope_namespaces` / `causely.ai/github-repo` label | Which entities this instance is allowed to act on, if running more than one instance | Config, optional |
+| 11 | `deploy/rbac.yaml` applied, mutate RoleBinding namespace matching `scope_namespaces` | Grants `kubectl_get`/`kubectl_get_secret_keys`/`kubectl_logs` **cluster-wide** (diagnosis shouldn't be namespace-blind — a root cause's dependency is often outside its own namespace), and, in `act` mode, `kubectl_rollout_restart`/`kubectl_scale` scoped per-namespace (mutation stays narrow even though reads are broad) | Optional — omitting it just omits these tools, no startup failure |
 
 ### Step-by-step
 
@@ -278,25 +279,31 @@ cp deploy/configmap.example.yaml deploy/configmap.yaml
 #   ... edit deploy/configmap.yaml ...
 kubectl apply -f deploy/configmap.yaml
 
-# 3. Apply the Deployment + Service.
+# 3. Apply RBAC (ServiceAccount + ClusterRole + a RoleBinding per target
+#    namespace) so the kubectl_* tools are available — edit the RoleBinding's
+#    namespace to match scope_namespaces first. Optional: skipping this just
+#    means kubectl tools are omitted, not a startup failure.
+kubectl apply -f deploy/rbac.yaml
+
+# 4. Apply the Deployment + Service.
 kubectl apply -f deploy/deployment.yaml
 
-# 4. Verify it's healthy.
+# 5. Verify it's healthy.
 kubectl rollout status deployment/causely-background-agent
 kubectl port-forward svc/causely-background-agent 8090:8090
 curl -f http://localhost:8090/healthz
 
-# 5. Wire mediator to this instance's /trigger (see §2's "Mediator → agent
+# 6. Wire mediator to this instance's /trigger (see §2's "Mediator → agent
 #    wiring") using the SAME value for the token as trigger-shared-secret
 #    above. This is a mediator notification-config change, done separately
 #    from this repo/deploy.
 
-# 6. Confirm end-to-end in observe mode: trigger a real or synthetic root
+# 7. Confirm end-to-end in observe mode: trigger a real or synthetic root
 #    cause, then check the pod logs and investigation_record_path (exec into
 #    the pod, or mount /data via a debug pod) for a completed
 #    InvestigationRecord before ever flipping action_mode to "act".
 
-# 7. Once trusted: edit deploy/configmap.yaml, set action_mode: "act",
+# 8. Once trusted: edit deploy/configmap.yaml, set action_mode: "act",
 #    kubectl apply -f deploy/configmap.yaml, then roll the deployment
 #    (kubectl rollout restart deployment/causely-background-agent) since
 #    ConfigMap changes aren't hot-reloaded.

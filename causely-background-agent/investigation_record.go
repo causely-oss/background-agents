@@ -56,6 +56,16 @@ type InvestigationRecord struct {
 	// actually work for a code-fix verdict, not just a remediation one.
 	ProposedFix *ProposedFix `json:"proposed_fix,omitempty"`
 
+	// CauselyRemediationHint is Causely's own suggested remediation from the
+	// triggering root cause, captured here for later human comparison against
+	// what the agent itself independently concluded. It is deliberately never
+	// shown to Claude during the investigation (see buildSystemPrompt in
+	// agent.go) — this agent's entire value over the generic hint is its tool
+	// access to live config, source code, and other observability data the
+	// hint's own LLM-generated guess didn't have; showing it the hint risks
+	// anchoring it into restating that guess instead of verifying it.
+	CauselyRemediationHint string `json:"causely_remediation_hint,omitempty"`
+
 	// Filled in later by human review or synthetic-bug ground truth — the
 	// agent never sets these itself.
 	CorrectnessLabel string `json:"correctness_label,omitempty"` // "correct", "incorrect", "insufficient_evidence"
@@ -68,6 +78,7 @@ const (
 	verdictSkippedStale     = "skipped_stale"
 	verdictFixProposed      = "fix_proposed"
 	verdictRemediationOnly  = "remediation_recommended"
+	verdictNoActionNeeded   = "no_action_needed"
 	verdictFailed           = "failed"
 	triggerSourceWebhook    = "webhook"
 	triggerSourcePoll       = "poll"

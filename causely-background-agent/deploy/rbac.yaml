@@ -1,0 +1,88 @@
+# RBAC for causely-background-agent's kubectl_* tools (see kube.go). The agent
+# auto-detects in-cluster credentials at startup; if this isn't applied,
+# kubectl tools are simply omitted — no fatal error, see newKubeClient.
+#
+# Split into two ClusterRoles, bound differently, on purpose:
+#   - Read (get/list/logs) is bound CLUSTER-WIDE. A root cause's actual
+#     dependency is often outside the namespace of the service it's degrading
+#     (found dogfooding: a gateway issue in "causely" needed to inspect
+#     Prometheus in "monitoring" — RBAC scoped to just "causely" blocked
+#     exactly the independent verification kubectl access exists for).
+#     Diagnosis should not be namespace-blind.
+#   - Mutate (kubectl_rollout_restart/kubectl_scale, act mode only — see
+#     buildTools in agent.go) is bound per-namespace, matching
+#     scope_namespaces in config.yaml. Read broadly, act narrowly: a bad
+#     restart/scale call has a much bigger blast radius than a bad read.
+#
+# Deliberately does NOT grant "get" on secrets in a way that exposes values —
+# kubectl_get_secret_keys uses the same RBAC verb as kubectl_get on other
+# kinds (list/get the object), but the tool layer only ever returns a
+# Secret's key names, never its decoded values (see kubeClient.GetSecretKeys
+# in kube.go). RBAC has no way to restrict a Role to a Secret's metadata/keys
+# without its data, so this safety boundary is enforced in this agent's own
+# code, not by RBAC — be aware of that if you fork/modify kube.go.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: causely-background-agent
+  namespace: causely-mediation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: causely-background-agent-read
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps", "secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: causely-background-agent-read
+subjects:
+  - kind: ServiceAccount
+    name: causely-background-agent
+    namespace: causely-mediation
+roleRef:
+  kind: ClusterRole
+  name: causely-background-agent-read
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: causely-background-agent-mutate
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["patch"] # rollout restart
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["update"] # scale
+---
+# Example RoleBinding scoping mutate access to ONE target namespace — copy
+# this block per namespace listed in config.yaml's scope_namespaces. A
+# ClusterRole bound via a namespaced RoleBinding only grants access within
+# that RoleBinding's namespace, not cluster-wide, despite the permissions
+# being defined on a ClusterRole (the standard way to reuse one rule set
+# across multiple, but not all, namespaces).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: causely-background-agent-mutate
+  namespace: causely # change to match scope_namespaces in config.yaml
+subjects:
+  - kind: ServiceAccount
+    name: causely-background-agent
+    namespace: causely-mediation
+roleRef:
+  kind: ClusterRole
+  name: causely-background-agent-mutate
+  apiGroup: rbac.authorization.k8s.io

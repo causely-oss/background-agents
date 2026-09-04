@@ -32,7 +32,7 @@ type slackActionPayload struct {
 // handleSlackAction handles POST /slack/actions from Slack interactive components.
 // It verifies the request signature, extracts the causely_fix_it action, and
 // launches a remediation investigation as a goroutine.
-func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *recorder) http.HandlerFunc {
+func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *recorder, kc *kubeClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 		if err != nil {
@@ -108,7 +108,7 @@ func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec
 		// Respond to Slack within 3 seconds or it retries.
 		w.WriteHeader(http.StatusOK)
 
-		go runAgent(logger, cfg, payload, weekly, rec, triggerSourceSlackFixIt)
+		go runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourceSlackFixIt)
 	}
 }
 

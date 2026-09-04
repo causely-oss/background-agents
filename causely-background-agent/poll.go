@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -64,7 +65,7 @@ func (w *pollWatermark) persist() error {
 // mediator to fire a one-time webhook. This exists because a webhook only reflects
 // an issue's state at the moment it fired — issues evolve (more/fewer symptoms,
 // severity shifts, auto-clear), and a poll loop is how the agent can notice that.
-func runPollLoop(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *recorder) {
+func runPollLoop(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *recorder, kc *kubeClient) {
 	interval, err := time.ParseDuration(cfg.Poll.Interval)
 	if err != nil {
 		logger.Fatal("invalid poll.interval", zap.Error(err))
@@ -78,11 +79,11 @@ func runPollLoop(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *reco
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		pollOnce(logger, cfg, client, watermark, weekly, rec)
+		pollOnce(logger, cfg, client, watermark, weekly, rec, kc)
 	}
 }
 
-func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *pollWatermark, weekly *weeklyBudget, rec *recorder) {
+func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *pollWatermark, weekly *weeklyBudget, rec *recorder, kc *kubeClient) {
 	raw, err := client.CallTool("get_issues", map[string]any{"only_active": true})
 	if err != nil {
 		logger.Warn("poll: get_issues failed", zap.Error(err))
@@ -105,7 +106,7 @@ func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *poll
 		}
 		changedCount++
 		payload := issue.toTriggerPayload(cfg)
-		go runAgent(logger, cfg, payload, weekly, rec, triggerSourcePoll)
+		go runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourcePoll)
 	}
 
 	if changedCount > 0 {
@@ -218,4 +219,13 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// oneLine collapses newlines (and the whitespace runs they tend to leave
+// behind) into single spaces, so a preview of a long multi-line field — logged
+// as one JSON structured-log value — reads as a single line in a terminal
+// instead of a wall of escaped "\n"s. The full, unflattened text still goes to
+// the persisted InvestigationRecord; this is only for the terse stdout log.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }

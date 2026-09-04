@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,7 +43,7 @@ func fixHasRealChange(fix ProposedFix) bool {
 // (may be nil) receives one InvestigationRecord no matter how this call ends
 // — skipped, failed, or completed — so behavior and RCA quality can be
 // measured later instead of only observed anecdotally in logs/Slack.
-func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *weeklyBudget, rec *recorder, triggerSource string) {
+func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *weeklyBudget, rec *recorder, kc *kubeClient, triggerSource string) {
 	log := logger.With(
 		zap.String("rc", payload.RootCauseName),
 		zap.String("entity", payload.EntityName),
@@ -60,6 +61,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 		ir.Severity = payload.Severity
 		ir.TriggerSource = triggerSource
 		ir.ActionMode = cfg.ActionMode
+		ir.CauselyRemediationHint = payload.Remediation
 		ir.StartedAt = startedAt
 		ir.FinishedAt = time.Now()
 		ir.DurationMS = ir.FinishedAt.Sub(startedAt).Milliseconds()
@@ -102,7 +104,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 
 	// 2. Run the agent loop: Claude investigates via MCP + GitHub, then either
 	// recommends an immediate remediation or proposes a long-term code fix.
-	outcome, tracker, toolCalls, err := runClaudeLoop(cfg, payload, sources, gh, log)
+	outcome, tracker, toolCalls, err := runClaudeLoop(cfg, payload, sources, gh, kc, log)
 	weekly.add(tracker.spentUSD)
 	log = log.With(zap.Float64("cost_usd", tracker.spentUSD))
 
@@ -126,7 +128,29 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 		return
 	}
 
-	// 3a. No code fix needed — an immediate remediation is sufficient. Post the
+	// 3a. Verification found no genuine defect — the flagged exception/log is
+	// already handled by design, or the issue already fully self-resolved with
+	// the live state matching what any fix would produce. Record it and stop;
+	// there's nothing to remediate or fix.
+	if outcome.Fix == nil && outcome.Remediation == "" {
+		if acting {
+			msg := fmt.Sprintf("✅ *Root cause*: %s\n\n%s\n\nNo action needed: %s\n\n💰 Cost: $%.4f",
+				payload.RootCauseName, outcome.Summary, outcome.NoActionReasoning, tracker.spentUSD)
+			if err := slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS, msg); err != nil {
+				log.Warn("failed to post to slack", zap.Error(err))
+			}
+		} else {
+			log.Info("observe mode: no action needed", zap.String("reasoning_preview", truncate(oneLine(outcome.NoActionReasoning), 200)))
+		}
+		summary := outcome.Summary
+		if outcome.NoActionReasoning != "" {
+			summary = strings.TrimSpace(summary + "\n\nNo action needed: " + outcome.NoActionReasoning)
+		}
+		finish(withUsage(InvestigationRecord{Verdict: verdictNoActionNeeded, Summary: summary}))
+		return
+	}
+
+	// 3b. No code fix needed — an immediate remediation is sufficient. Post the
 	// recommendation (if acting) and stop; there's no PR to open.
 	if outcome.Fix == nil {
 		if acting {
@@ -136,13 +160,13 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 				log.Warn("failed to post to slack", zap.Error(err))
 			}
 		} else {
-			log.Info("observe mode: would have recommended remediation", zap.String("remediation", outcome.Remediation))
+			log.Info("observe mode: would have recommended remediation", zap.String("remediation_preview", truncate(oneLine(outcome.Remediation), 200)))
 		}
 		finish(withUsage(InvestigationRecord{Verdict: verdictRemediationOnly, Summary: outcome.Summary, Remediation: outcome.Remediation}))
 		return
 	}
 
-	// 3b. A long-term code fix is warranted. In observe mode, stop here without
+	// 3c. A long-term code fix is warranted. In observe mode, stop here without
 	// touching GitHub/Slack — the record still captures what would have happened.
 	if !acting {
 		log.Info("observe mode: would have opened a PR", zap.String("pr_title", outcome.Fix.PRTitle))
@@ -277,14 +301,22 @@ type FileChange struct {
 }
 
 // investigationOutcome is what runClaudeLoop produces on success. Exactly one
-// of Fix or Remediation is meaningful: Fix != nil means Claude called
-// propose_fix (a long-term code change, PR-worthy); Fix == nil means Claude
-// called recommend_remediation instead (an immediate action — restart,
-// rollback, scale — that doesn't need a code change at all).
+// of Fix, Remediation, or NoActionReasoning is meaningful: Fix != nil means
+// Claude called propose_fix (a long-term code change, PR-worthy); Remediation
+// != "" means it called recommend_remediation (an immediate action that
+// doesn't need a code change); NoActionReasoning != "" means it called
+// no_action_needed — verification found no genuine defect (already
+// self-resolved with no live drift, or the flagged exception/log is already
+// gracefully handled by design), so neither of the other two applies. Without
+// this third option the tool schema would force an action-shaped answer even
+// when the correct answer is "nothing is actually wrong" — found dogfooding:
+// a diagnosis named "Unhandled...Exception" whose own source code caught and
+// gracefully handled that exact exception by design.
 type investigationOutcome struct {
-	Fix         *ProposedFix
-	Remediation string
-	Summary     string
+	Fix               *ProposedFix
+	Remediation       string
+	NoActionReasoning string
+	Summary           string
 }
 
 var proposefixSchema = json.RawMessage(`{
@@ -317,12 +349,21 @@ var recommendRemediationSchema = json.RawMessage(`{
   "required": ["recommended_action"]
 }`)
 
-func buildTools(sources []mcpSource, repo string) []anthropicTool {
+var noActionNeededSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "summary": {"type": "string", "description": "what you found investigating the root cause"},
+    "reasoning": {"type": "string", "description": "why no remediation or fix is warranted — e.g. the exception is already caught and handled by design (cite the file/lines), or the issue already fully self-resolved with the live state already matching what any fix would produce"}
+  },
+  "required": ["reasoning"]
+}`)
+
+func buildTools(sources []mcpSource, repo string, kubectlAvailable, acting bool) []anthropicTool {
 	total := 0
 	for _, s := range sources {
 		total += len(s.Tools)
 	}
-	tools := make([]anthropicTool, 0, total+4)
+	tools := make([]anthropicTool, 0, total+9)
 
 	// MCP tools from every configured server, prefixed by source name so
 	// Claude's tool calls can be routed back to the right server.
@@ -365,7 +406,47 @@ func buildTools(sources []mcpSource, repo string) []anthropicTool {
 			Description: "Recommend an immediate remediation (restart, rollback, scale, revert a config) with no code change and no PR. Prefer this whenever an immediate action resolves the issue.",
 			InputSchema: recommendRemediationSchema,
 		},
+		anthropicTool{
+			Name:        "no_action_needed",
+			Description: "Call this when investigation shows there is no genuine defect to remediate or fix — the flagged exception/log is already caught and handled gracefully by the code (by design, not a bug), or the issue has already fully self-resolved and the live state already matches what any fix would produce. Do not force recommend_remediation or propose_fix when neither actually applies.",
+			InputSchema: noActionNeededSchema,
+		},
 	)
+
+	if kubectlAvailable {
+		tools = append(tools,
+			anthropicTool{
+				Name:        "kubectl_get",
+				Description: "Get a live Kubernetes resource as JSON — the most authoritative source of current cluster state, more so than any cached/indexed view. Supported kinds: deployment, statefulset, daemonset, replicaset, pod, service, configmap. Does NOT return Secret content — use kubectl_get_secret_keys for that.",
+				InputSchema: json.RawMessage(`{"type":"object","properties":{"kind":{"type":"string"},"namespace":{"type":"string"},"name":{"type":"string"}},"required":["kind","namespace","name"]}`),
+			},
+			anthropicTool{
+				Name:        "kubectl_get_secret_keys",
+				Description: "List the key names (not values) present in a Kubernetes Secret's data — lets you confirm a Secret's shape (e.g. does it have a given config key) without exposing its contents.",
+				InputSchema: json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"name":{"type":"string"}},"required":["namespace","name"]}`),
+			},
+			anthropicTool{
+				Name:        "kubectl_logs",
+				Description: "Fetch recent log lines from a pod's container.",
+				InputSchema: json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"pod":{"type":"string"},"container":{"type":"string","description":"omit if the pod has only one container"},"tail_lines":{"type":"integer","default":100}},"required":["namespace","pod"]}`),
+			},
+		)
+		if acting {
+			tools = append(tools,
+				anthropicTool{
+					Name:        "kubectl_rollout_restart",
+					Description: "Trigger a rolling restart of a Deployment, StatefulSet, or DaemonSet — equivalent to `kubectl rollout restart`. This executes immediately; only call it once you're confident it's the right remediation.",
+					InputSchema: json.RawMessage(`{"type":"object","properties":{"kind":{"type":"string","enum":["deployment","statefulset","daemonset"]},"namespace":{"type":"string"},"name":{"type":"string"}},"required":["kind","namespace","name"]}`),
+				},
+				anthropicTool{
+					Name:        "kubectl_scale",
+					Description: "Set the replica count of a Deployment, StatefulSet, or ReplicaSet — equivalent to `kubectl scale`. This executes immediately; only call it once you're confident it's the right remediation.",
+					InputSchema: json.RawMessage(`{"type":"object","properties":{"kind":{"type":"string","enum":["deployment","statefulset","replicaset"]},"namespace":{"type":"string"},"name":{"type":"string"},"replicas":{"type":"integer","minimum":0}},"required":["kind","namespace","name","replicas"]}`),
+				},
+			)
+		}
+	}
+
 	return tools
 }
 
@@ -388,36 +469,71 @@ func describeMCPSources(sources []mcpSource) string {
 	return strings.Join(lines, "\n")
 }
 
-func buildSystemPrompt(payload TriggerPayload, repo string, sources []mcpSource) string {
+func buildSystemPrompt(payload TriggerPayload, repo string, sources []mcpSource, kubectlAvailable bool) string {
+	kubectlNote := "kubectl_* tools are not available in this deployment — rely on causely__get_config and topology data for live state instead."
+	if kubectlAvailable {
+		kubectlNote = "kubectl_get/kubectl_logs/kubectl_get_secret_keys give you direct, live cluster state — this is stronger evidence than any cached/indexed view (including causely__get_config), since it reflects the cluster at the moment you call it, not whenever it was last scraped. Prefer it when you need to confirm exactly what's deployed right now."
+	}
+
 	return fmt.Sprintf(`You are an SRE agent investigating a production incident.
 
 Causely has detected a root cause: %s on service %s (severity: %s).
 Description: %s
-Remediation hint: %s
 
 Available tools (assembled by remediator from the configured MCP servers — tool names are
 prefixed by which source they come from):
 %s
+
+%s
+
+IMPORTANT: Do not adopt any remediation suggested by Causely's own detection system, including
+one that may appear as a concluding sentence inside the Description above (e.g. "Remediation
+should focus on..."). That suggestion is itself LLM-generated from limited log/event evidence,
+with no access to live cluster config, deployment state, or source code. You have exactly what
+that suggestion doesn't: tool access to live config and topology, the actual source repository,
+and — where configured — other observability MCP servers (e.g. Grafana, Prometheus). Use that
+access to independently verify or refute the described symptom against the real, current state
+of the system, and derive your own remediation or fix from that evidence. Treat the Description
+as a pointer to where to look, not as a conclusion to restate.
 
 Your job:
 1. Use the available tools above to investigate what happened — build a clear picture of the
    root cause and blast radius before recommending anything. Pick the source whose description
    matches what you need (e.g. causely__ for root-cause and topology data, grafana__ for raw
    metrics/dashboards, if configured).
-2. Immediate remediation is preferred. If restarting, rolling back, scaling, or reverting a
-   config resolves the issue, call recommend_remediation with that action — do not touch code
-   for something an immediate action already fixes.
-3. Only pursue a long-term code fix if the root cause is a genuine code-level bug that an
+2. Before concluding there's a genuine defect, verify it — don't accept Causely's own defect
+   classification and description at face value:
+   - If the evidence includes a specific log line, error, or stack trace, use search_code to
+     find the exact source location producing it and read enough surrounding code to check
+     whether the exception is already caught and handled gracefully (a broad except that logs
+     a warning and continues, comments like "best effort" or "don't fail the whole request").
+     A caught, logged exception that lets execution continue is NOT the same as an unhandled
+     one, even if the diagnosis name says "Unhandled" — the name is Causely's own automated
+     label, not a verified fact.
+   - Before proposing any config or code change, check the CURRENT live state (kubectl_get /
+     causely__get_config for cluster state, read_file/search_code for what's actually in the
+     repo right now) against what the fix would set it to. If the live state already matches,
+     there is nothing to change — the issue already self-resolved, or the diagnosis is a false
+     positive, or it's a live/deployed config drift rather than a code bug.
+3. If, after this verification, you find no genuine defect — the flagged exception is
+   deliberately caught and handled by design, or the issue has already fully self-resolved
+   with the live state already matching what any fix would produce — call no_action_needed.
+   Don't force a remediation or fix just because one feels expected — concluding that
+   nothing is actually wrong is a legitimate, first-class outcome when the evidence supports it.
+4. Otherwise, immediate remediation is preferred. If restarting, rolling back, scaling, or
+   reverting a config resolves the issue, call recommend_remediation with that action — do not
+   touch code for something an immediate action already fixes.
+5. Only pursue a long-term code fix if the root cause is a genuine code-level bug that an
    immediate remediation can't address. In that case: use search_code to jump straight to the
    relevant file(s) in repository %s — prefer it over list_directory when you have a symbol
    name, error string, or config key to search for; this is a large monorepo and blind
    directory walking wastes time and money. Use read_file to confirm the exact code, then call
    propose_fix with the exact search/replace change, a PR title, and a PR body.
 
-Call exactly one of recommend_remediation or propose_fix to finish. Be specific —
-propose_fix.changes must contain exact strings that appear in the code.`,
+Call exactly one of recommend_remediation, propose_fix, or no_action_needed to finish. Be
+specific — propose_fix.changes must contain exact strings that appear in the code.`,
 		payload.RootCauseName, payload.EntityName, payload.Severity,
-		payload.Description, payload.Remediation, describeMCPSources(sources), repo)
+		payload.Description, describeMCPSources(sources), kubectlNote, repo)
 }
 
 // runClaudeLoop runs the Claude tool-use loop until Claude calls propose_fix
@@ -425,15 +541,16 @@ propose_fix.changes must contain exact strings that appear in the code.`,
 // (USD spend + token totals) and a per-tool-call summary — the latter two are
 // what let an InvestigationRecord answer "how much digging did this need,"
 // independent of whether the loop finished normally or was aborted.
-func runClaudeLoop(cfg Config, payload TriggerPayload, sources []mcpSource, gh *githubClient, log *zap.Logger) (investigationOutcome, *costTracker, []ToolCallSummary, error) {
-	tools := buildTools(sources, cfg.GitHubRepo)
+func runClaudeLoop(cfg Config, payload TriggerPayload, sources []mcpSource, gh *githubClient, kc *kubeClient, log *zap.Logger) (investigationOutcome, *costTracker, []ToolCallSummary, error) {
+	acting := cfg.ActionMode == actionModeAct
+	tools := buildTools(sources, cfg.GitHubRepo, kc != nil, acting)
 
 	messages := []anthropicMessage{{
 		Role:    "user",
-		Content: fmt.Sprintf("Investigate root cause '%s' (id: %s) on entity '%s'. Use available tools, then call recommend_remediation or propose_fix.", payload.RootCauseName, payload.RootCauseID, payload.EntityName),
+		Content: fmt.Sprintf("Investigate root cause '%s' (id: %s) on entity '%s'. Use available tools, then call recommend_remediation, propose_fix, or no_action_needed.", payload.RootCauseName, payload.RootCauseID, payload.EntityName),
 	}}
 
-	system := buildSystemPrompt(payload, cfg.GitHubRepo, sources)
+	system := buildSystemPrompt(payload, cfg.GitHubRepo, sources, kc != nil)
 	tracker := newCostTracker(cfg.MaxCostUSD)
 	var allText []string
 	var toolCallSummaries []ToolCallSummary
@@ -470,7 +587,7 @@ func runClaudeLoop(cfg Config, payload TriggerPayload, sources []mcpSource, gh *
 		messages = append(messages, anthropicMessage{Role: "assistant", Content: resp.Content})
 
 		if resp.StopReason == "end_turn" || len(toolCalls) == 0 {
-			return investigationOutcome{Summary: strings.Join(allText, "\n")}, tracker, toolCallSummaries, fmt.Errorf("agent ended without calling recommend_remediation or propose_fix")
+			return investigationOutcome{Summary: strings.Join(allText, "\n")}, tracker, toolCallSummaries, fmt.Errorf("agent ended without calling recommend_remediation, propose_fix, or no_action_needed")
 		}
 
 		// Execute tool calls.
@@ -520,6 +637,20 @@ func runClaudeLoop(cfg Config, payload TriggerPayload, sources []mcpSource, gh *
 				}
 				return investigationOutcome{Remediation: rec.RecommendedAction, Summary: summary}, tracker, toolCallSummaries, nil
 
+			case tc.Name == "no_action_needed":
+				var na struct {
+					Summary   string `json:"summary"`
+					Reasoning string `json:"reasoning"`
+				}
+				if err := json.Unmarshal(tc.Input, &na); err != nil {
+					return investigationOutcome{}, tracker, toolCallSummaries, fmt.Errorf("parse no_action_needed: %w", err)
+				}
+				summary := na.Summary
+				if summary == "" {
+					summary = strings.Join(allText, "\n")
+				}
+				return investigationOutcome{NoActionReasoning: na.Reasoning, Summary: summary}, tracker, toolCallSummaries, nil
+
 			case isMCPTool:
 				server = mcpSrc.Name
 				result, callErr = mcpSrc.Client.CallTool(mcpToolName, args)
@@ -538,6 +669,48 @@ func runClaudeLoop(cfg Config, payload TriggerPayload, sources []mcpSource, gh *
 				server = "github"
 				query, _ := args["query"].(string)
 				result, callErr = gh.SearchCode(query)
+
+			case tc.Name == "kubectl_get" && kc != nil:
+				server = "kubectl"
+				kind, _ := args["kind"].(string)
+				ns, _ := args["namespace"].(string)
+				name, _ := args["name"].(string)
+				result, callErr = kc.GetResource(context.Background(), kind, ns, name)
+
+			case tc.Name == "kubectl_get_secret_keys" && kc != nil:
+				server = "kubectl"
+				ns, _ := args["namespace"].(string)
+				name, _ := args["name"].(string)
+				result, callErr = kc.GetSecretKeys(context.Background(), ns, name)
+
+			case tc.Name == "kubectl_logs" && kc != nil:
+				server = "kubectl"
+				ns, _ := args["namespace"].(string)
+				pod, _ := args["pod"].(string)
+				container, _ := args["container"].(string)
+				tailLines := int64(100)
+				if v, ok := args["tail_lines"].(float64); ok {
+					tailLines = int64(v)
+				}
+				result, callErr = kc.GetPodLogs(context.Background(), ns, pod, container, tailLines)
+
+			case tc.Name == "kubectl_rollout_restart" && kc != nil && acting:
+				server = "kubectl"
+				kind, _ := args["kind"].(string)
+				ns, _ := args["namespace"].(string)
+				name, _ := args["name"].(string)
+				result, callErr = kc.RolloutRestart(context.Background(), kind, ns, name)
+
+			case tc.Name == "kubectl_scale" && kc != nil && acting:
+				server = "kubectl"
+				kind, _ := args["kind"].(string)
+				ns, _ := args["namespace"].(string)
+				name, _ := args["name"].(string)
+				var replicas int32
+				if v, ok := args["replicas"].(float64); ok {
+					replicas = int32(v)
+				}
+				result, callErr = kc.ScaleResource(context.Background(), kind, ns, name, replicas)
 
 			default:
 				server = "unknown"
@@ -560,7 +733,7 @@ func runClaudeLoop(cfg Config, payload TriggerPayload, sources []mcpSource, gh *
 		messages = append(messages, anthropicMessage{Role: "user", Content: results})
 	}
 
-	return investigationOutcome{Summary: strings.Join(allText, "\n")}, tracker, toolCallSummaries, fmt.Errorf("reached max iterations without recommend_remediation or propose_fix")
+	return investigationOutcome{Summary: strings.Join(allText, "\n")}, tracker, toolCallSummaries, fmt.Errorf("reached max iterations without recommend_remediation, propose_fix, or no_action_needed")
 }
 
 func callClaude(apiKey, system string, messages []anthropicMessage, tools []anthropicTool) (*anthropicResponse, error) {

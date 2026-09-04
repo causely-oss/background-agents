@@ -1,4 +1,7 @@
 # Deployment + Service for causely-background-agent. Requires:
+#   - rbac.yaml applied (ServiceAccount + ClusterRole + a RoleBinding per
+#     target namespace) for the kubectl_* tools to be available at all — if
+#     skipped, the agent starts fine but omits those tools (see kube.go).
 #   - a ConfigMap named causely-background-agent (see configmap.example.yaml)
 #   - a Secret named causely-background-agent with keys: anthropic-api-key, github-token,
 #     slack-bot-token, slack-signing-secret (optional), causely-mcp-token
@@ -31,6 +34,7 @@ spec:
       labels:
         app: causely-background-agent
     spec:
+      serviceAccountName: causely-background-agent
       containers:
         - name: causely-background-agent
           image: docker.io/causelyai/causely-background-agent:latest

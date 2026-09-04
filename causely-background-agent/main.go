@@ -67,9 +67,11 @@ func main() {
 
 	weekly := newWeeklyBudget(cfg.MaxWeeklyCostUSD, cfg.CostStateFile)
 	rec := newRecorder(cfg.InvestigationRecordPath, logger)
+	kc, kcErr := newKubeClient()
+	logKubeClientInit(logger, kc, kcErr)
 
 	if cfg.Poll.Enabled {
-		go runPollLoop(logger, cfg, weekly, rec)
+		go runPollLoop(logger, cfg, weekly, rec, kc)
 	}
 
 	mux := http.NewServeMux()
@@ -78,7 +80,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mux.HandleFunc("POST /slack/actions", handleSlackAction(logger, cfg, weekly, rec))
+	mux.HandleFunc("POST /slack/actions", handleSlackAction(logger, cfg, weekly, rec, kc))
 
 	mux.HandleFunc("POST /trigger", func(w http.ResponseWriter, r *http.Request) {
 		if !validTriggerAuth(r, cfg.TriggerSharedSecret) {
@@ -101,7 +103,7 @@ func main() {
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
-		go runAgent(logger, cfg, payload, weekly, rec, triggerSourceWebhook)
+		go runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourceWebhook)
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}
