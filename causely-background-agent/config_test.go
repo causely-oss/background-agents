@@ -113,6 +113,31 @@ func TestLoadConfig_MissingSecretEnvErrors(t *testing.T) {
 // "" (e.g. an untouched values.yaml default) — cleanenv's env-required alone
 // only checks the env var is present, not non-empty, so this must be checked
 // explicitly or a misconfigured Secret would pass loadConfig silently.
+func TestLoadConfig_PartialCauselyMCPClientCredentialsErrors(t *testing.T) {
+	setRequiredSecretEnv(t)
+	t.Setenv("CAUSELY_MCP_CLIENT_ID", "id-only")
+	path := writeTestConfig(t, `github_repo: "org/repo"`)
+
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("expected an error when CAUSELY_MCP_CLIENT_ID is set without CAUSELY_MCP_CLIENT_SECRET")
+	}
+}
+
+func TestLoadConfig_FullCauselyMCPClientCredentialsAccepted(t *testing.T) {
+	setRequiredSecretEnv(t)
+	t.Setenv("CAUSELY_MCP_CLIENT_ID", "id")
+	t.Setenv("CAUSELY_MCP_CLIENT_SECRET", "secret")
+	path := writeTestConfig(t, `github_repo: "org/repo"`)
+
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatalf("loadConfig() error = %v", err)
+	}
+	if cfg.MCPServers[0].ClientID != "id" || cfg.MCPServers[0].ClientSecret != "secret" {
+		t.Errorf("causely server = %+v, want client_id/client_secret set", cfg.MCPServers[0])
+	}
+}
+
 func TestLoadConfig_EmptySecretEnvErrors(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	t.Setenv("GITHUB_TOKEN", "gt")

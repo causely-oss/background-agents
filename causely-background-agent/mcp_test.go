@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -106,6 +107,24 @@ func TestMCPClientPost_SendsBearerTokenWhenConfigured(t *testing.T) {
 	}
 	if gotAuth != "Bearer secret-token" {
 		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer secret-token")
+	}
+}
+
+func TestMCPClientPost_SendsBasicAuthWhenClientCredentialsConfigured(t *testing.T) {
+	var gotAuth string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`))
+	}))
+	defer server.Close()
+
+	client := newMCPClientBasicAuth(server.URL, "my-client", "my-secret")
+	if _, err := client.ListTools(); err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("my-client:my-secret"))
+	if gotAuth != want {
+		t.Errorf("Authorization header = %q, want %q", gotAuth, want)
 	}
 }
 

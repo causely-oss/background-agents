@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,14 +11,27 @@ import (
 )
 
 type mcpClient struct {
-	url    string
-	token  string // optional bearer token; empty means no Authorization header
-	client *http.Client
-	seq    int
+	url   string
+	token string // optional bearer token; empty means no Authorization header
+	// clientID/clientSecret, if both set, take precedence over token: they're sent as
+	// HTTP Basic credentials instead of a Bearer token. This is for MCP servers (e.g.
+	// Causely's own, on tenants with Frontegg auth enabled) that exchange client_id:secret
+	// for a short-lived access token themselves and cache it server-side — the caller
+	// never has to fetch/refresh a token, just always sends the same static pair.
+	clientID     string
+	clientSecret string
+	client       *http.Client
+	seq          int
 }
 
 func newMCPClient(url string, token string) *mcpClient {
 	return &mcpClient{url: url, token: token, client: &http.Client{Timeout: 30 * time.Second}}
+}
+
+// newMCPClientBasicAuth creates a client that authenticates with HTTP Basic
+// credentials (clientID:clientSecret) instead of a bearer token — see mcpClient.
+func newMCPClientBasicAuth(url, clientID, clientSecret string) *mcpClient {
+	return &mcpClient{url: url, clientID: clientID, clientSecret: clientSecret, client: &http.Client{Timeout: 30 * time.Second}}
 }
 
 type mcpRequest struct {
@@ -53,7 +67,11 @@ func (c *mcpClient) post(method string, params any) (json.RawMessage, error) {
 	// Accept header is sent. Ask for it explicitly so intent is documented;
 	// extractSSEData below handles the actual unwrapping either way.
 	httpReq.Header.Set("Accept", "application/json, text/event-stream")
-	if c.token != "" {
+	switch {
+	case c.clientID != "" && c.clientSecret != "":
+		basic := base64.StdEncoding.EncodeToString([]byte(c.clientID + ":" + c.clientSecret))
+		httpReq.Header.Set("Authorization", "Basic "+basic)
+	case c.token != "":
 		httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	}
 

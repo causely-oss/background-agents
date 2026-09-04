@@ -47,6 +47,15 @@ type InvestigationRecord struct {
 	PRUrl       string `json:"pr_url,omitempty"`
 	Error       string `json:"error,omitempty"`
 
+	// ProposedFix is Claude's full propose_fix output (PR title, body, exact file
+	// changes), recorded whenever Fix != nil — including in observe mode, and even
+	// when act mode's CreatePR call itself failed. Without this, a fix_proposed
+	// verdict in observe mode is unreviewable: the only place the actual diff ever
+	// existed was a transient log line (pr_title only), gone once it scrolled past.
+	// This is what makes "evaluate Causely's RCA quality without opening a real PR"
+	// actually work for a code-fix verdict, not just a remediation one.
+	ProposedFix *ProposedFix `json:"proposed_fix,omitempty"`
+
 	// Filled in later by human review or synthetic-bug ground truth — the
 	// agent never sets these itself.
 	CorrectnessLabel string `json:"correctness_label,omitempty"` // "correct", "incorrect", "insufficient_evidence"
@@ -56,6 +65,7 @@ type InvestigationRecord struct {
 const (
 	verdictSkippedScope     = "skipped_scope"
 	verdictSkippedBudget    = "skipped_budget"
+	verdictSkippedStale     = "skipped_stale"
 	verdictFixProposed      = "fix_proposed"
 	verdictRemediationOnly  = "remediation_recommended"
 	verdictFailed           = "failed"

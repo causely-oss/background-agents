@@ -75,8 +75,13 @@ Non-secret settings come from a YAML config file (`-config`, default
 `/config/config.yaml`); see `deploy/configmap.example.yaml` for every field.
 Credentials come from environment variables only — `ANTHROPIC_API_KEY`,
 `GITHUB_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` (optional),
-`CAUSELY_MCP_TOKEN` (optional), `TRIGGER_SHARED_SECRET` (optional, but you
-should set it — see below).
+`CAUSELY_MCP_TOKEN` (optional, bearer-token auth to the Causely MCP server),
+`CAUSELY_MCP_CLIENT_ID` + `CAUSELY_MCP_CLIENT_SECRET` (optional, HTTP Basic
+auth instead — for a Causely tenant with Frontegg auth enabled, which
+exchanges and caches a Frontegg access token server-side so this agent never
+has to fetch/refresh one itself; set both or neither, and they take
+precedence over `CAUSELY_MCP_TOKEN` if both are set), `TRIGGER_SHARED_SECRET`
+(optional, but you should set it — see below).
 
 ## Securing `/trigger`
 
@@ -95,8 +100,8 @@ go build -o causely-background-agent .
 Or build and push the container:
 
 ```bash
-docker build -t docker.io/causely/causely-background-agent:latest .
-docker push docker.io/causely/causely-background-agent:latest
+docker build -t docker.io/causelyai/causely-background-agent:latest .
+docker push docker.io/causelyai/causely-background-agent:latest
 ```
 
 ## Deploy
@@ -109,9 +114,10 @@ Kubernetes manifests, no Helm/chart dependency. Create the Secret out-of-band
 ## Known limitations
 
 - No RC-type allowlist — every root cause type triggers an investigation.
-- `MCP_SERVERS_JSON`-style extra MCP server tokens configured via
-  `mcp_servers` in config.yaml land in the ConfigMap, not a Secret — fine for
-  an unauthenticated server, be aware for an authenticated one.
+- `MCP_SERVERS_JSON`-style extra MCP server tokens (and client_id/client_secret
+  pairs) configured via `mcp_servers` in config.yaml land in the ConfigMap, not
+  a Secret — fine for an unauthenticated server, be aware for an authenticated
+  one.
 - Cost-state and poll-watermark persistence use whatever volume you mount at
   `/data` — an `emptyDir` survives container restarts but not pod
   recreation; use a PVC if you need the latter.

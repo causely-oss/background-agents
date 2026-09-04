@@ -2,8 +2,12 @@
 #   - a ConfigMap named causely-background-agent (see configmap.example.yaml)
 #   - a Secret named causely-background-agent with keys: anthropic-api-key, github-token,
 #     slack-bot-token, slack-signing-secret (optional), causely-mcp-token
-#     (optional), trigger-shared-secret (optional but strongly recommended —
-#     see README.md). Create it out-of-band, e.g.:
+#     (optional, bearer-token auth to the Causely MCP server), causely-mcp-client-id
+#     + causely-mcp-client-secret (optional, HTTP Basic auth to the Causely MCP
+#     server instead — for a tenant with Frontegg auth enabled; set both or
+#     neither, and prefer these over causely-mcp-token if the tenant supports
+#     both), trigger-shared-secret (optional but strongly recommended — see
+#     README.md). Create it out-of-band, e.g.:
 #       kubectl create secret generic causely-background-agent \
 #         --from-literal=anthropic-api-key=... \
 #         --from-literal=github-token=... \
@@ -29,7 +33,7 @@ spec:
     spec:
       containers:
         - name: causely-background-agent
-          image: docker.io/causely/causely-background-agent:latest
+          image: docker.io/causelyai/causely-background-agent:latest
           command: ["/bin/causely-background-agent"]
           args: ["-config", "/config/config.yaml"]
           env:
@@ -43,6 +47,10 @@ spec:
               valueFrom: { secretKeyRef: { name: causely-background-agent, key: slack-signing-secret, optional: true } }
             - name: CAUSELY_MCP_TOKEN
               valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-token, optional: true } }
+            - name: CAUSELY_MCP_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-client-id, optional: true } }
+            - name: CAUSELY_MCP_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-client-secret, optional: true } }
             - name: TRIGGER_SHARED_SECRET
               valueFrom: { secretKeyRef: { name: causely-background-agent, key: trigger-shared-secret, optional: true } }
           ports:

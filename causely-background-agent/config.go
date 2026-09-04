@@ -51,6 +51,12 @@ type Config struct {
 	SlackBotToken      string `env:"SLACK_BOT_TOKEN" env-required:"true"`
 	SlackSigningSecret string `env:"SLACK_SIGNING_SECRET"`
 	CauselyMCPToken    string `env:"CAUSELY_MCP_TOKEN"`
+	// CauselyMCPClientID/CauselyMCPClientSecret are an alternative to
+	// CauselyMCPToken for a Causely MCP server that expects HTTP Basic
+	// credentials (client_id:secret) instead of a bearer token — see
+	// MCPServerConfig in mcp_config.go. Both must be set together, or neither.
+	CauselyMCPClientID     string `env:"CAUSELY_MCP_CLIENT_ID"`
+	CauselyMCPClientSecret string `env:"CAUSELY_MCP_CLIENT_SECRET"`
 	// TriggerSharedSecret, if set, is required as a Bearer token on POST
 	// /trigger — this agent is a standalone deployable asset reachable over the
 	// network, not a same-repo internal call, so unlike the old design it can't
@@ -101,7 +107,11 @@ func loadConfig(path string) (Config, error) {
 		}
 	}
 
-	servers, err := resolveMCPServers(cfg.CauselyMCPURL, cfg.CauselyMCPToken, cfg.MCPServers)
+	if (cfg.CauselyMCPClientID == "") != (cfg.CauselyMCPClientSecret == "") {
+		return Config{}, fmt.Errorf("CAUSELY_MCP_CLIENT_ID and CAUSELY_MCP_CLIENT_SECRET must both be set, or neither")
+	}
+
+	servers, err := resolveMCPServers(cfg.CauselyMCPURL, cfg.CauselyMCPToken, cfg.CauselyMCPClientID, cfg.CauselyMCPClientSecret, cfg.MCPServers)
 	if err != nil {
 		return Config{}, err
 	}

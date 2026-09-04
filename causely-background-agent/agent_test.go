@@ -104,6 +104,32 @@ func TestBuildSystemPrompt_MentionsConfiguredSources(t *testing.T) {
 	}
 }
 
+func TestFixHasRealChange_TrueWhenAnyChangeDiffers(t *testing.T) {
+	fix := ProposedFix{Changes: []FileChange{
+		{Path: "a.go", Search: "x", Replace: "x"},
+		{Path: "b.go", Search: "y", Replace: "z"},
+	}}
+	if !fixHasRealChange(fix) {
+		t.Error("fixHasRealChange() = false, want true when at least one change differs")
+	}
+}
+
+func TestFixHasRealChange_FalseWhenAllChangesAreNoOps(t *testing.T) {
+	fix := ProposedFix{Changes: []FileChange{
+		{Path: "a.go", Search: "x", Replace: "x"},
+		{Path: "b.go", Search: "y", Replace: "y"},
+	}}
+	if fixHasRealChange(fix) {
+		t.Error("fixHasRealChange() = true, want false when every change is a no-op")
+	}
+}
+
+func TestFixHasRealChange_FalseWhenNoChanges(t *testing.T) {
+	if fixHasRealChange(ProposedFix{}) {
+		t.Error("fixHasRealChange() = true, want false for an empty change set")
+	}
+}
+
 func TestMCPToolDefUnmarshalsInputSchema(t *testing.T) {
 	var def mcpToolDef
 	raw := `{"name":"x","description":"d","inputSchema":{"type":"object"}}`

@@ -17,6 +17,24 @@ import (
 // budget (Config.MaxCostUSD) is exceeded before propose_fix is called.
 var errBudgetExceeded = errors.New("investigation aborted: cost budget exceeded")
 
+// errNoOpFix is surfaced back to Claude as a tool_result when propose_fix is
+// called with every change's search == replace — see fixHasRealChange.
+var errNoOpFix = errors.New("every change has identical search and replace text — a no-op that would open an empty PR. If the repository already matches the desired end state, this isn't a code bug: call recommend_remediation instead, don't call propose_fix again with this same diff")
+
+// fixHasRealChange reports whether fix contains at least one change that would
+// actually modify a file. A ProposedFix with no changes, or where every
+// change's Search equals its Replace, produces a byte-identical PR — most
+// commonly because the repo already matches the intended state and the real
+// root cause is a live/deployed config drift rather than a code bug.
+func fixHasRealChange(fix ProposedFix) bool {
+	for _, c := range fix.Changes {
+		if c.Search != c.Replace {
+			return true
+		}
+	}
+	return false
+}
+
 // runAgent is the top-level entry point called per trigger, regardless of
 // trigger source (webhook, poll, Slack button). weekly enforces the aggregate
 // rolling-window cost cap shared across every investigation this process
@@ -65,6 +83,13 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 				fmt.Sprintf("⚠️ causely-background-agent skipped investigating %s: %s", payload.RootCauseName, reason))
 		}
 		finish(InvestigationRecord{Verdict: verdictSkippedBudget, SkipReason: reason})
+		return
+	}
+
+	// The built-in causely MCP server is always cfg.MCPServers[0] — see resolveMCPServers.
+	if skip, reason := checkRootCauseStillActive(cfg.MCPServers[0].newClient(), payload.RootCauseID, log); skip {
+		log.Info("root cause already resolved, skipping investigation", zap.String("reason", reason))
+		finish(InvestigationRecord{Verdict: verdictSkippedStale, SkipReason: reason})
 		return
 	}
 
@@ -121,7 +146,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 	// touching GitHub/Slack — the record still captures what would have happened.
 	if !acting {
 		log.Info("observe mode: would have opened a PR", zap.String("pr_title", outcome.Fix.PRTitle))
-		finish(withUsage(InvestigationRecord{Verdict: verdictFixProposed, Summary: outcome.Summary}))
+		finish(withUsage(InvestigationRecord{Verdict: verdictFixProposed, Summary: outcome.Summary, ProposedFix: outcome.Fix}))
 		return
 	}
 
@@ -130,7 +155,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 		log.Warn("failed to create PR", zap.Error(err))
 		_ = slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS,
 			fmt.Sprintf("🔍 *Diagnosis*: %s\n\n⚠️ Could not open PR automatically: %s\n\n💰 Cost: $%.4f", outcome.Summary, err, tracker.spentUSD))
-		finish(withUsage(InvestigationRecord{Verdict: verdictFailed, Summary: outcome.Summary, Error: err.Error()}))
+		finish(withUsage(InvestigationRecord{Verdict: verdictFailed, Summary: outcome.Summary, Error: err.Error(), ProposedFix: outcome.Fix}))
 		return
 	}
 	log.Info("PR created", zap.String("url", prURL))
@@ -140,7 +165,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 	if err := slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS, msg); err != nil {
 		log.Warn("failed to post to slack", zap.Error(err))
 	}
-	finish(withUsage(InvestigationRecord{Verdict: verdictFixProposed, Summary: outcome.Summary, PRUrl: prURL}))
+	finish(withUsage(InvestigationRecord{Verdict: verdictFixProposed, Summary: outcome.Summary, PRUrl: prURL, ProposedFix: outcome.Fix}))
 }
 
 // mcpSource is one configured MCP server together with the tools it exposed
@@ -160,7 +185,7 @@ type mcpSource struct {
 func loadMCPSources(cfg Config, log *zap.Logger) []mcpSource {
 	sources := make([]mcpSource, 0, len(cfg.MCPServers))
 	for _, s := range cfg.MCPServers {
-		client := newMCPClient(s.URL, s.Token)
+		client := s.newClient()
 		tools, err := client.ListTools()
 		if err != nil {
 			log.Warn("failed to list MCP tools", zap.String("mcp_server", s.Name), zap.Error(err))
@@ -467,6 +492,17 @@ func runClaudeLoop(cfg Config, payload TriggerPayload, sources []mcpSource, gh *
 				var fix ProposedFix
 				if err := json.Unmarshal(tc.Input, &fix); err != nil {
 					return investigationOutcome{}, tracker, toolCallSummaries, fmt.Errorf("parse propose_fix: %w", err)
+				}
+				if !fixHasRealChange(fix) {
+					// Every change is a no-op (search == replace, or no changes at all) —
+					// most commonly seen when the repo already matches the desired end
+					// state and the actual root cause is a live/deployed config drift, not
+					// a code bug. Reject and let Claude reconsider rather than silently
+					// terminating the loop with a PR-worthy verdict that would open an
+					// empty, misleading PR in act mode.
+					server = "agent"
+					callErr = errNoOpFix
+					break
 				}
 				return investigationOutcome{Fix: &fix, Summary: strings.Join(allText, "\n")}, tracker, toolCallSummaries, nil
 

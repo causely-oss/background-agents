@@ -72,7 +72,7 @@ func runPollLoop(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *reco
 	watermark := loadPollWatermark(cfg.Poll.StateFile)
 
 	// The built-in causely MCP server is always cfg.MCPServers[0] — see resolveMCPServers.
-	client := newMCPClient(cfg.CauselyMCPURL, cfg.CauselyMCPToken)
+	client := cfg.MCPServers[0].newClient()
 
 	logger.Info("poll loop starting", zap.Duration("interval", interval))
 	ticker := time.NewTicker(interval)
