@@ -57,10 +57,19 @@ like the k8s one, only exist inside a private network.
 ## Should you use it?
 
 - **Local/demo (this repo's default):** cloudflared quick tunnel. Zero
-  setup beyond running a script, no request-access gate.
+  setup beyond running a script, no request-access gate — but the URL is
+  random and rotates every restart.
+- **Local, but tired of re-pasting `K8S_MCP_URL`:** a cloudflared *named*
+  tunnel is a small step up, still entirely local — `run-k8s-mcp.sh`
+  supports it via `K8S_MCP_TUNNEL_NAME`/`K8S_MCP_TUNNEL_HOSTNAME`, same
+  pattern (and same one-time `cloudflared tunnel login`/`create`/
+  `route dns` setup) as the durable webhook URL in
+  [docs/causely-webhook.md](causely-webhook.md#durable-webhook-url). Fixes
+  the rotating-URL annoyance; still a laptop process and still your
+  cluster's own MCP server directly reachable at that hostname.
 - **Production or enterprise:** MCP tunnels, once you have access — no
-  public exposure of your cluster, no rotating demo URL, managed centrally
-  by an org admin instead of by whoever has a terminal open.
+  public exposure of your cluster at all (outbound-only gateway), managed
+  centrally by an org admin instead of by whoever has a terminal open.
 
 MCP tunnels are not generally available at time of writing; access is
 request-only. Don't build a production rollout plan around them without
