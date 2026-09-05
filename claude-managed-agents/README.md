@@ -55,11 +55,13 @@ cp .env.example .env               # fill in ANTHROPIC_API_KEY
 ./scripts/run-k8s-mcp.sh           # runs the k8s MCP server + cloudflared tunnel
 ```
 
-Copy the printed `K8S_MCP_URL` into `.env`. The agent is scoped to a single
-namespace via `K8S_NAMESPACE` (default `scenario-01`, matching a real target
-cluster) — the `kind/setup.sh` demo workload above lives in `demo`, so for
-that local walkthrough set `K8S_NAMESPACE=demo` instead (or `""` to lift the
-restriction entirely). Then:
+Copy the printed `K8S_MCP_URL` into `.env`. That URL is random and rotates
+every time you restart the script — see [docs/mcp-tunnels.md](docs/mcp-tunnels.md#should-you-use-it)
+for a cloudflared *named* tunnel instead, which keeps it fixed. The agent is
+scoped to a single namespace via `K8S_NAMESPACE` (default `scenario-01`,
+matching a real target cluster) — the `kind/setup.sh` demo workload above
+lives in `demo`, so for that local walkthrough set `K8S_NAMESPACE=demo`
+instead (or `""` to lift the restriction entirely). Then:
 
 ```bash
 streamlit run app.py
@@ -173,6 +175,52 @@ separate always-on process (`webhook.py`) receives it — see
 that has to be a process you host (the Managed Agents API has no native
 inbound-webhook trigger).
 
+### Running multiple agents in parallel
+
+Everything above assumes one instance. To compare configurations directly
+— one agent with Causely, one without; different models; anything else
+`provided.py`'s `TOOLS`/`SYSTEM_PROMPT` vary on — run `streamlit run app.py`
+more than once, each with its own `.env`.
+
+That only works if each instance's cloud agent is actually distinct.
+`setup_agent()` in `agent.py` finds-by-name before creating, so two
+processes that share an `AGENT_NAME` land on the *same* cloud agent and each
+silently overwrite the other's tools/system prompt on startup. Give each
+instance its own name (and, if you want a different model, `ANTHROPIC_MODEL`
+— it only applies the first time that name is created, not to an existing
+agent):
+
+```bash
+# terminal 1 — Causely-enabled, port 8501
+AGENT_NAME="SRE Agent (causely)" ENABLE_CAUSELY=1 streamlit run app.py --server.port 8501
+
+# terminal 2 — baseline, port 8502
+AGENT_NAME="SRE Agent (baseline)" streamlit run app.py --server.port 8502
+```
+
+`ENVIRONMENT_NAME` (the sandbox the agent's container runs in) is safe to
+share across instances — unlike the agent, it carries no config that can
+collide — but it's configurable too if you'd rather isolate that as well.
+
+Each instance's session picker already scopes to its own agent
+(`sessions.list(agent_id=...)` in `provided.py`), so the two won't show each
+other's sessions. If you also run `webhook.py`, it resolves the agent the
+same way `app.py` does — set `AGENT_NAME`/`ENABLE_CAUSELY` in *its* env to
+control which instance a Causely notification lands on.
+
+If you'd rather keep full `.env` files per configuration instead of setting
+variables inline, `python-dotenv`'s bundled CLI (already in
+`requirements.txt`) can point at one:
+
+```bash
+dotenv -f .env.causely run -- streamlit run app.py --server.port 8501
+```
+
+Note that `app.py` also calls `load_dotenv()` on the plain `.env` in the
+current directory, which never overrides a variable that's already set — so
+`.env.causely` only needs to contain the variables that differ from `.env`,
+not a full duplicate.
+
 ## Want a more realistic scenario?
 
 The `kind/` demo here is intentionally minimal — three pods, one deliberately
@@ -238,7 +286,10 @@ Details: [docs/auth.md](docs/auth.md).
 ## Coming next
 
 A reproducible with/without-Causely benchmark — same investigation, same
-cluster, measured — is a planned follow-up repo.
+cluster, measured — is a planned follow-up repo. [Running multiple agents in
+parallel](#running-multiple-agents-in-parallel) gets you the two
+differently-configured instances side by side today; scoring/comparing them
+automatically is the rest of that work.
 
 ## Repo layout
 

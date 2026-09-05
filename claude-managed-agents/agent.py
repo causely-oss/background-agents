@@ -30,8 +30,17 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "")
 GITHUB_MOUNT_PATH = os.environ.get("GITHUB_MOUNT_PATH", "/workspace/repo")
 
 
-AGENT_NAME = "SRE Agent"
-ENVIRONMENT_NAME = "sre-agent"
+# Both default to the original single-instance names. Override these (and
+# ANTHROPIC_MODEL below) per .env to run multiple differently-configured
+# instances in parallel — e.g. one with ENABLE_CAUSELY=1, one without, or
+# each on a different model. Two processes that share an AGENT_NAME will
+# find-by-name onto the SAME cloud agent and each overwrite the other's
+# tools/system prompt on startup (see setup_agent() below); ENVIRONMENT_NAME
+# is safe to share since environments carry no config to collide over, but
+# it's configurable too if you'd rather isolate the sandbox as well.
+AGENT_NAME = os.environ.get("AGENT_NAME", "SRE Agent")
+ENVIRONMENT_NAME = os.environ.get("ENVIRONMENT_NAME", "sre-agent")
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-7")
 
 
 # ── 1. Agent ──────────────────────────────────────────────────────────────
@@ -41,7 +50,9 @@ ENVIRONMENT_NAME = "sre-agent"
 # alongside app.py) converges on the SAME cloud agent instead of minting a
 # duplicate. If one already exists, its config is synced to the current
 # SYSTEM_PROMPT/TOOLS/mcp_servers on every fetch, so a still-running process
-# never serves a stale tool set after you add a server and restart.
+# never serves a stale tool set after you add a server and restart. (Model
+# is deliberately NOT synced on update — changing MODEL for an existing
+# agent name has no effect; give it a new AGENT_NAME instead.)
 @st.cache_resource
 def setup_agent() -> str:
     existing = _find_by_name(client.beta.agents.list(limit=100).data, AGENT_NAME)
@@ -52,7 +63,7 @@ def setup_agent() -> str:
         )
         return updated.id
     created = client.beta.agents.create(
-        name=AGENT_NAME, model="claude-opus-4-7", system=SYSTEM_PROMPT,
+        name=AGENT_NAME, model=MODEL, system=SYSTEM_PROMPT,
         tools=TOOLS, mcp_servers=_mcp_servers(),
     )
     return created.id

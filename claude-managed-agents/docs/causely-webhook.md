@@ -57,9 +57,47 @@ service (Causely) needs to reach this local receiver. It prints a URL like:
 Causely webhook URL: https://<tunnel-host>.trycloudflare.com/webhook/causely
 ```
 
-That URL rotates every restart, same caveat as `K8S_MCP_URL` — for
-anything beyond local testing, this needs a real, stable deployment
-instead of a laptop process behind a quick tunnel.
+That URL rotates every restart, same caveat as `K8S_MCP_URL` — see
+[Durable webhook URL](#durable-webhook-url) below to stop that. For
+anything beyond local testing, this still needs a real, stable deployment
+instead of a laptop process behind a tunnel of either kind — a named
+tunnel just gets you a fixed URL in the meantime.
+
+## Durable webhook URL
+
+The default quick tunnel above mints a random `*.trycloudflare.com`
+hostname every time the script restarts. A cloudflared **named tunnel**
+fixes that — same tool, but tied to a hostname you own instead of a random
+one, so it survives restarts. One-time setup, against your own Cloudflare
+account and a domain already managed there:
+
+```bash
+# 1. Authorize cloudflared against your Cloudflare account (opens a
+#    browser). Writes ~/.cloudflared/cert.pem.
+cloudflared tunnel login
+
+# 2. Create the tunnel. Writes credentials to ~/.cloudflared/<tunnel-id>.json.
+cloudflared tunnel create causely-webhook
+
+# 3. Point a hostname in your Cloudflare-managed domain at it (a CNAME).
+cloudflared tunnel route dns causely-webhook causely-webhook.yourdomain.com
+```
+
+Then run the script with that tunnel's name and hostname instead of the
+default quick-tunnel mode:
+
+```bash
+WEBHOOK_TUNNEL_NAME=causely-webhook \
+WEBHOOK_TUNNEL_HOSTNAME=causely-webhook.yourdomain.com \
+./scripts/run-webhook.sh
+```
+
+It'll print `https://causely-webhook.yourdomain.com/webhook/causely` —
+paste that into Causely **once**; it won't change on subsequent restarts,
+so there's nothing to re-paste. Steps 1–3 only need to happen once ever
+(the credentials in `~/.cloudflared/` persist); after that, just set the
+two env vars whenever you run the script — an env file you `source`, or a
+tiny wrapper script, works well if you don't want to retype them.
 
 ## 3. Point Causely at it
 
