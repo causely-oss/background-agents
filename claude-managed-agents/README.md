@@ -16,25 +16,15 @@ you write.
 It's runnable end to end against a local [kind](https://kind.sigs.k8s.io/)
 cluster.
 
-## Why a tunnel for a "local" cluster
-
-The agent doesn't run on your laptop — it runs in a managed container in
-Anthropic's cloud. That container **cannot reach `localhost` or a private
-kind API server**; it can only reach public URLs. So the MCP server that
-talks to your kind cluster runs locally (pointed at kind via your
-kubeconfig), and a [cloudflared](https://github.com/cloudflare/cloudflared)
-quick tunnel gives it a public HTTPS URL the cloud agent can call. Nothing
-in this setup ever points the agent at `localhost`.
-
-The cloudflared quick tunnel is the works-today default here, good for
-local development and proof of concept. For a production or enterprise deployment —
-where you don't want to expose your cluster publicly at all — Anthropic
-Managed Agents' native **MCP tunnels** feature (research preview, request
-access) is the right path: an outbound-only gateway you deploy, with no
-inbound firewall rules or public endpoint. See
-[docs/mcp-tunnels.md](docs/mcp-tunnels.md) for how it maps onto this repo.
-
 ## Quickstart
+
+The agent runs in a managed container in Anthropic's cloud, not on your
+laptop, so it can't reach `localhost` or a private kind API server directly
+— only public URLs. The MCP server that talks to kind therefore runs
+locally, and a [cloudflared](https://github.com/cloudflare/cloudflared)
+tunnel gives it a public HTTPS URL the cloud agent can call. That's a
+local-dev convenience; for a production setup that doesn't expose your
+cluster publicly at all, see [docs/mcp-tunnels.md](docs/mcp-tunnels.md).
 
 Prerequisites: Docker, [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation),
 `kubectl`, [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/),
@@ -79,7 +69,14 @@ You can review logs from the session including how long the response took and ho
 When you're done: `./kind/teardown.sh` deletes the kind cluster, and
 Ctrl-C stops `run-k8s-mcp.sh`.
 
-## The three servers, three auth patterns
+## Add more tools
+
+Quickstart above gets you just the k8s MCP server. Everything below is
+optional, and each follows the same pattern: stand up a server, tunnel it,
+add its URL (and any credential) to `.env`, then **fully restart**
+`streamlit run app.py` — not just refresh the browser. `setup_agent()` is
+cached for the life of the process, so a still-running process keeps
+reusing an agent that was created without the new server wired in.
 
 | Server | Runnable in this repo? | Auth pattern |
 |---|---|---|
@@ -90,17 +87,8 @@ Ctrl-C stops `run-k8s-mcp.sh`.
 ¹ In production, swap the cloudflared tunnel for a native MCP tunnel
 (research preview, request access) — see [docs/mcp-tunnels.md](docs/mcp-tunnels.md).
 
-Full explanation of the vault mechanism and the Bearer-only connector
-constraint: [docs/auth.md](docs/auth.md).
-
-## Trying it with Grafana and Causely
-
-Both are optional add-ons on top of the k8s MCP server above, and both follow
-the same pattern: stand up the server, tunnel it, add its URL (and any
-credential) to `.env`, then **fully restart** `streamlit run app.py` — not
-just refresh the browser. `setup_agent()` is cached for the life of the
-process, so a still-running process keeps reusing an agent that was created
-without the new server wired in.
+How the vault/credential mechanism behind that table actually works:
+[docs/auth.md](docs/auth.md).
 
 ### Add Grafana
 
@@ -145,8 +133,7 @@ diagnosis directly.
 
 ### Add a GitHub repo checkout
 
-This one's a different shape from Grafana/Causely: instead of a remote MCP
-server the agent calls tools on, it's a repo checked out straight into the
+This is different shape from  remote MCP servers, it's a repo checked out straight into the
 agent's sandbox filesystem, so the agent can read (and, with its shell/file
 tools, edit) real source rather than just cluster state. It's wired through
 `resources` on `sessions.create`, not `mcp_servers` — see
@@ -165,17 +152,18 @@ Unlike the MCP servers, this is read per-session rather than cached — restart
 Streamlit after changing these and start a **new** session (existing
 sessions keep whatever was mounted when they were created).
 
-### Trigger investigations from Causely
+## Send it notifications
 
-The three additions above all make the agent *better at answering questions
-you ask it*. This one is the other direction: Causely pushes a notification
-and the agent starts investigating on its own, with nobody watching. A
-separate always-on process (`webhook.py`) receives it — see
-[docs/causely-webhook.md](docs/causely-webhook.md) for setup, and for why
-that has to be a process you host (the Managed Agents API has no native
+Everything above makes the agent *better at answering questions you ask
+it*. This is the other direction: Causely pushes a notification and the
+agent starts investigating on its own, with nobody watching. A separate
+always-on process (`webhook.py`) receives it — see
+[docs/causely-webhook.md](docs/causely-webhook.md) for setup (including how
+to get a webhook URL that doesn't rotate every restart), and for why that
+has to be a process you host (the Managed Agents API has no native
 inbound-webhook trigger).
 
-### Running multiple agents in parallel
+## Running multiple agents in parallel
 
 Everything above assumes one instance. To compare configurations directly
 — one agent with Causely, one without; different models; anything else
@@ -231,58 +219,6 @@ and point `run-k8s-mcp.sh` (and, if you're using Grafana,
 [docs/grafana.md](docs/grafana.md)'s kube-prometheus-stack) at that cluster
 instead of the one from `kind/setup.sh`.
 
-## The Managed Agents resource model
-
-Four resources, created in this order:
-
-**Agent → Environment → Session → Events**
-
-- **Agent** — the model, system prompt, and tools (including which MCP
-  servers it can call). Created once, reused forever — `setup_agent()` finds
-  it by name before creating, so every process that imports `agent.py`
-  (`app.py`, `webhook.py`, a one-off script) converges on the same cloud
-  agent instead of each minting its own.
-- **Environment** — where the agent's container runs. Same find-by-name
-  reuse as the agent.
-- **Session** — one conversation, bound to an agent + environment (+ a vault
-  of MCP credentials, + optionally a GitHub repo checkout mounted into the
-  sandbox — see [Add a GitHub repo checkout](#add-a-github-repo-checkout)).
-  Sessions are real cloud resources, listed with `sessions.list()` and
-  replayed with `events.list()` — no local database.
-- **Events** — the message/tool-call stream for a session, opened with
-  `sessions.events.stream()` and appended to with `sessions.events.send()`.
-
-`agent.py` implements this as six functions:
-
-| # | Function | API call |
-|---|---|---|
-| 1 | `setup_agent()` | `client.beta.agents.create` |
-| 2 | `setup_vault()` | `client.beta.vaults.create` + `vaults.credentials.create` |
-| 3 | `setup_environment()` | `client.beta.environments.create` |
-| 4 | `start_session()` | `client.beta.sessions.create` |
-| 5 | `stream_reply()` | `client.beta.sessions.events.stream` + `.send` |
-| 6 | `delete_session()` | `client.beta.sessions.delete` |
-
-Everything else — the system prompt, tool declarations, session picker, and
-chat UI — is in `provided.py`.
-
-## Tools and auth, in brief
-
-- Every MCP server the agent can call is declared by URL in `agent.py`'s
-  `mcp_servers` list, and enabled as a tool in `provided.py`'s `TOOLS` list
-  via `mcp_toolset`. The two lists are gated on the same env vars — a server
-  declared without a matching toolset (or vice versa) makes agent creation
-  fail with a 400.
-- Credentials for those servers don't live on the server entry — they live
-  in a **vault**, created per session and referenced by `vault_ids=[...]` at
-  session creation, matched to a server by exact URL string.
-- The MCP connector only ever sends `Authorization: Bearer <token>` — it
-  can't send Basic auth or a custom header. That's why Causely's native
-  client-credentials flow is exchanged for a JWT first, then handed to the
-  vault as a bearer token, rather than passed through directly.
-
-Details: [docs/auth.md](docs/auth.md).
-
 ## Coming next
 
 A reproducible with/without-Causely benchmark — same investigation, same
@@ -294,7 +230,10 @@ automatically is the rest of that work.
 ## Repo layout
 
 ```
-agent.py            ← the agent: 6 functions, one Managed Agents call each
+.env.example         ← copy to .env and fill in — every setting lives here
+requirements.txt     ← Python deps
+
+agent.py             ← the agent: 6 functions, one Managed Agents call each
 provided.py          ← system prompt, tool declarations, chat UI
 e2e.py               ← headless smoke test of the k8s MCP path
 
