@@ -64,7 +64,7 @@ func (p NotificationPayload) toTriggerPayload() TriggerPayload {
 		name = p.CustomName
 	}
 	return TriggerPayload{
-		RootCauseID:     p.ObjectId,
+		IssueID:         p.ObjectId,
 		EntityID:        p.Entity.Id,
 		EntityName:      p.Entity.Name,
 		RootCauseName:   name,

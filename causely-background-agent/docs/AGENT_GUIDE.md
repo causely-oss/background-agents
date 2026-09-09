@@ -250,6 +250,7 @@ exactly the following inputs; everything else below is mechanical.
 | 9 | `action_mode` | `observe` or `act` | Config, defaults to `observe` — deploy in `observe` first |
 | 10 | `scope_namespaces` / `causely.ai/github-repo` label | Which entities this instance is allowed to act on, if running more than one instance | Config, optional |
 | 11 | `deploy/rbac.yaml` applied, mutate RoleBinding namespace matching `scope_namespaces` | Grants `kubectl_get`/`kubectl_get_secret_keys`/`kubectl_logs` **cluster-wide** (diagnosis shouldn't be namespace-blind — a root cause's dependency is often outside its own namespace), and, in `act` mode, `kubectl_rollout_restart`/`kubectl_scale` scoped per-namespace (mutation stays narrow even though reads are broad) | Optional — omitting it just omits these tools, no startup failure |
+| 12 | `deploy/pvc.yaml` applied, before `deployment.yaml` | Backs `/data` (investigation records, weekly cost state, poll watermark) with real storage so it survives pod recreation, not just a container restart — `deployment.yaml` references it by claim name | **Required** — `deployment.yaml` won't schedule without a matching PVC; no cluster default StorageClass (e.g. a bare `kind` cluster) means installing one first |
 
 ### Step-by-step
 
@@ -279,31 +280,36 @@ cp deploy/configmap.example.yaml deploy/configmap.yaml
 #   ... edit deploy/configmap.yaml ...
 kubectl apply -f deploy/configmap.yaml
 
-# 3. Apply RBAC (ServiceAccount + ClusterRole + a RoleBinding per target
+# 3. Apply the PVC for /data (investigation records, weekly cost state, poll
+#    watermark) — must exist before deployment.yaml, which references it by
+#    claim name. Required, not optional: without it the pod won't schedule.
+kubectl apply -f deploy/pvc.yaml
+
+# 4. Apply RBAC (ServiceAccount + ClusterRole + a RoleBinding per target
 #    namespace) so the kubectl_* tools are available — edit the RoleBinding's
 #    namespace to match scope_namespaces first. Optional: skipping this just
 #    means kubectl tools are omitted, not a startup failure.
 kubectl apply -f deploy/rbac.yaml
 
-# 4. Apply the Deployment + Service.
+# 5. Apply the Deployment + Service.
 kubectl apply -f deploy/deployment.yaml
 
-# 5. Verify it's healthy.
+# 6. Verify it's healthy.
 kubectl rollout status deployment/causely-background-agent
 kubectl port-forward svc/causely-background-agent 8090:8090
 curl -f http://localhost:8090/healthz
 
-# 6. Wire mediator to this instance's /trigger (see §2's "Mediator → agent
+# 7. Wire mediator to this instance's /trigger (see §2's "Mediator → agent
 #    wiring") using the SAME value for the token as trigger-shared-secret
 #    above. This is a mediator notification-config change, done separately
 #    from this repo/deploy.
 
-# 7. Confirm end-to-end in observe mode: trigger a real or synthetic root
+# 8. Confirm end-to-end in observe mode: trigger a real or synthetic root
 #    cause, then check the pod logs and investigation_record_path (exec into
-#    the pod, or mount /data via a debug pod) for a completed
-#    InvestigationRecord before ever flipping action_mode to "act".
+#    the pod) for a completed InvestigationRecord before ever flipping
+#    action_mode to "act".
 
-# 8. Once trusted: edit deploy/configmap.yaml, set action_mode: "act",
+# 9. Once trusted: edit deploy/configmap.yaml, set action_mode: "act",
 #    kubectl apply -f deploy/configmap.yaml, then roll the deployment
 #    (kubectl rollout restart deployment/causely-background-agent) since
 #    ConfigMap changes aren't hot-reloaded.
@@ -320,10 +326,13 @@ other if mediator's routing is imperfect.
 
 ### Persistence caveats (read before relying on `act` mode long-term)
 
-- `/data` is an `emptyDir` in the stock `deployment.yaml` — survives
-  container restarts but **not** pod recreation/rescheduling. Swap it for a
-  PVC if you need `cost_state_file` (weekly budget) or
-  `poll.state_file` (poll watermark) to survive that.
+- `/data` is a PVC (`deploy/pvc.yaml`, `ReadWriteOnce`, 1Gi default) — apply
+  it before `deployment.yaml`, which references it by claim name. This is
+  what makes `investigation_record_path`, `cost_state_file` (weekly budget),
+  and `poll.state_file` (poll watermark) survive pod recreation, not just a
+  container restart within the same pod — confirmed live, a routine
+  `kubectl rollout restart` on an `emptyDir`-backed deployment wiped the
+  entire investigation-record history each time.
 - `deployment.yaml` uses `strategy: Recreate` and `replicas: 1` deliberately
   — this agent isn't safe to run as multiple replicas racing on the same
   `/data` volume.

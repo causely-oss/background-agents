@@ -239,6 +239,39 @@ func TestBuildSystemPrompt_InstructsVerificationBeforeConcludingDefect(t *testin
 	}
 }
 
+// TestBuildSystemPrompt_InstructsAgainstUnverifiedSecretClaims guards a
+// hallucination found dogfooding: the agent asserted "the Secret has been
+// updated" as fact — something it structurally cannot see, since
+// kubectl_get_secret_keys only ever returns key names, never values.
+func TestBuildSystemPrompt_InstructsAgainstUnverifiedSecretClaims(t *testing.T) {
+	prompt := buildSystemPrompt(TriggerPayload{}, "org/repo", nil, false)
+	for _, want := range []string{
+		"key NAMES ONLY, never its decoded values",
+		`Never assert a claim about what a Secret currently`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("buildSystemPrompt() missing Secret-claim guardrail text %q", want)
+		}
+	}
+}
+
+// TestBuildSystemPrompt_InstructsAgainstConflatingClassifierWithCaller guards
+// a second hallucination found dogfooding: the agent cited an observability
+// span-classifier (code that merely recognizes the string "brpop") as if it
+// were the actual application code issuing that Redis command without a
+// timeout — a real call site that didn't exist anywhere in the repo.
+func TestBuildSystemPrompt_InstructsAgainstConflatingClassifierWithCaller(t *testing.T) {
+	prompt := buildSystemPrompt(TriggerPayload{}, "org/repo", nil, false)
+	for _, want := range []string{
+		"confirm you found the actual call site",
+		"is NOT the same as the",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("buildSystemPrompt() missing classifier-vs-caller guardrail text %q", want)
+		}
+	}
+}
+
 func TestMCPToolDefUnmarshalsInputSchema(t *testing.T) {
 	var def mcpToolDef
 	raw := `{"name":"x","description":"d","inputSchema":{"type":"object"}}`

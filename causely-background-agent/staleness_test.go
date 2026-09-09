@@ -20,51 +20,51 @@ func mcpToolResultServer(t *testing.T, text string) *httptest.Server {
 	}))
 }
 
-func TestCheckRootCauseStillActive_ResolvedIssueIsSkipped(t *testing.T) {
+func TestCheckIssueStillActive_ResolvedIssueIsSkipped(t *testing.T) {
 	server := mcpToolResultServer(t, `{"issues":[{"id":"rc-1","ended_at":"2026-08-30T12:03:13Z"}]}`)
 	defer server.Close()
 
 	client := newMCPClient(server.URL, "")
-	skip, reason := checkRootCauseStillActive(client, "rc-1", zap.NewNop())
+	skip, reason := checkIssueStillActive(client, "rc-1", zap.NewNop())
 	if !skip {
-		t.Fatal("checkRootCauseStillActive() skip = false, want true for a resolved issue")
+		t.Fatal("checkIssueStillActive() skip = false, want true for a resolved issue")
 	}
 	if reason == "" {
 		t.Error("expected a non-empty skip reason")
 	}
 }
 
-func TestCheckRootCauseStillActive_ActiveIssueProceeds(t *testing.T) {
+func TestCheckIssueStillActive_ActiveIssueProceeds(t *testing.T) {
 	server := mcpToolResultServer(t, `{"issues":[{"id":"rc-1","ended_at":""}]}`)
 	defer server.Close()
 
 	client := newMCPClient(server.URL, "")
-	skip, _ := checkRootCauseStillActive(client, "rc-1", zap.NewNop())
+	skip, _ := checkIssueStillActive(client, "rc-1", zap.NewNop())
 	if skip {
-		t.Error("checkRootCauseStillActive() skip = true, want false for a still-active issue")
+		t.Error("checkIssueStillActive() skip = true, want false for a still-active issue")
 	}
 }
 
-func TestCheckRootCauseStillActive_FailsOpenOnUnparseableResponse(t *testing.T) {
+func TestCheckIssueStillActive_FailsOpenOnUnparseableResponse(t *testing.T) {
 	server := mcpToolResultServer(t, `not json at all`)
 	defer server.Close()
 
 	client := newMCPClient(server.URL, "")
-	skip, _ := checkRootCauseStillActive(client, "rc-1", zap.NewNop())
+	skip, _ := checkIssueStillActive(client, "rc-1", zap.NewNop())
 	if skip {
-		t.Error("checkRootCauseStillActive() skip = true, want false (fail open) when the response can't be parsed")
+		t.Error("checkIssueStillActive() skip = true, want false (fail open) when the response can't be parsed")
 	}
 }
 
-func TestCheckRootCauseStillActive_FailsOpenOnToolError(t *testing.T) {
+func TestCheckIssueStillActive_FailsOpenOnToolError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"message":"boom"}}`))
 	}))
 	defer server.Close()
 
 	client := newMCPClient(server.URL, "")
-	skip, _ := checkRootCauseStillActive(client, "rc-1", zap.NewNop())
+	skip, _ := checkIssueStillActive(client, "rc-1", zap.NewNop())
 	if skip {
-		t.Error("checkRootCauseStillActive() skip = true, want false (fail open) when the tool call errors")
+		t.Error("checkIssueStillActive() skip = true, want false (fail open) when the tool call errors")
 	}
 }

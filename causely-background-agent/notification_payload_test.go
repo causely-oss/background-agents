@@ -24,7 +24,7 @@ func TestNotificationPayload_ToTriggerPayload(t *testing.T) {
 	}
 	p := n.toTriggerPayload()
 
-	if p.RootCauseID != "rc-1" || p.EntityID != "e-1" || p.EntityName != "buggy-app" ||
+	if p.IssueID != "rc-1" || p.EntityID != "e-1" || p.EntityName != "buggy-app" ||
 		p.RootCauseName != "ImagePullErrors" || p.Severity != "Critical" ||
 		p.Description != "bad image tag" || p.Remediation != "correct the tag" ||
 		p.EntityNamespace != "chaosmania" || p.GitHubRepoLabel != "org/repo" {

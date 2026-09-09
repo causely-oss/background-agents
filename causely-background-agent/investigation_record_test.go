@@ -14,8 +14,8 @@ func TestRecorder_AppendsOneJSONLinePerRecord(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "records.jsonl")
 	rec := newRecorder(path, zap.NewNop())
 
-	rec.record(InvestigationRecord{RootCauseID: "rc-1", Verdict: verdictFixProposed})
-	rec.record(InvestigationRecord{RootCauseID: "rc-2", Verdict: verdictSkippedScope})
+	rec.record(InvestigationRecord{IssueID: "rc-1", Verdict: verdictFixProposed})
+	rec.record(InvestigationRecord{IssueID: "rc-2", Verdict: verdictSkippedScope})
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -36,7 +36,7 @@ func TestRecorder_AppendsOneJSONLinePerRecord(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
 		t.Fatalf("unmarshal first line: %v", err)
 	}
-	if first.RootCauseID != "rc-1" || first.Verdict != verdictFixProposed {
+	if first.IssueID != "rc-1" || first.Verdict != verdictFixProposed {
 		t.Errorf("first record = %+v", first)
 	}
 }
@@ -53,7 +53,7 @@ func TestRecorder_PersistsProposedFix(t *testing.T) {
 		PRBody:  "body",
 		Changes: []FileChange{{Path: "main.go", Search: "old", Replace: "new"}},
 	}
-	rec.record(InvestigationRecord{RootCauseID: "rc-1", Verdict: verdictFixProposed, ProposedFix: fix})
+	rec.record(InvestigationRecord{IssueID: "rc-1", Verdict: verdictFixProposed, ProposedFix: fix})
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -73,10 +73,10 @@ func TestRecorder_PersistsProposedFix(t *testing.T) {
 
 func TestRecorder_NilPathIsNoOp(t *testing.T) {
 	rec := newRecorder("", zap.NewNop())
-	rec.record(InvestigationRecord{RootCauseID: "rc-1"}) // must not panic or create anything
+	rec.record(InvestigationRecord{IssueID: "rc-1"}) // must not panic or create anything
 }
 
 func TestRecorder_NilRecorderIsNoOp(t *testing.T) {
 	var rec *recorder
-	rec.record(InvestigationRecord{RootCauseID: "rc-1"}) // must not panic
+	rec.record(InvestigationRecord{IssueID: "rc-1"}) // must not panic
 }

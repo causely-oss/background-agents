@@ -84,7 +84,19 @@ func runPollLoop(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *reco
 }
 
 func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *pollWatermark, weekly *weeklyBudget, rec *recorder, kc *kubeClient) {
-	raw, err := client.CallTool("get_issues", map[string]any{"only_active": true})
+	// active_only is get_issues's real parameter name (its default is already true,
+	// so this was previously a no-op typo — "only_active" — that happened to work by
+	// coincidence). namespace_names filters server-side: get_issues's lightweight
+	// per-issue response doesn't reliably include entity/label data (unlike
+	// get_issue_details), so scope_namespaces can't be enforced client-side here the
+	// way inScope() does for the webhook/Slack trigger sources — asking the API to
+	// only return matching issues in the first place is the only sound way to keep
+	// polling scoped to specific namespaces.
+	args := map[string]any{"active_only": true}
+	if len(cfg.ScopeNamespaces) > 0 {
+		args["namespace_names"] = cfg.ScopeNamespaces
+	}
+	raw, err := client.CallTool("get_issues", args)
 	if err != nil {
 		logger.Warn("poll: get_issues failed", zap.Error(err))
 		return
@@ -98,10 +110,10 @@ func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *poll
 
 	changedCount := 0
 	for _, issue := range issues {
-		if issue.RootCauseID == "" {
+		if issue.IssueID == "" {
 			continue
 		}
-		if !watermark.changed(issue.RootCauseID, issue.version()) {
+		if !watermark.changed(issue.IssueID, issue.version()) {
 			continue
 		}
 		changedCount++
@@ -122,7 +134,7 @@ func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *poll
 // fallback across the plausible key names rather than a rigid struct, and a
 // missing root cause ID just skips the issue (logged) rather than panicking.
 type polledIssue struct {
-	RootCauseID     string
+	IssueID         string
 	EntityID        string
 	EntityName      string
 	EntityNamespace string
@@ -134,6 +146,20 @@ type polledIssue struct {
 	SymptomCount    float64
 }
 
+// version returns an opaque string that changes only when there's genuinely
+// new information about this issue, so pollOnce's watermark doesn't
+// re-investigate something already seen.
+//
+// NOTE: the severity|symptom_count fallback below is known to be noisy —
+// top-level severity can flicker (baseline vs. elevated) as the same
+// diagnosis merely toggles active/inactive, which can make a single
+// flare-and-clear look like two separate "new occurrences" a poll cycle
+// apart. A tighter fix (keying on primary_diagnosis.id + started_at instead)
+// was tried and reverted: that's really a signal-quality issue on Causely's
+// own get_issues response, not something this one reference agent should
+// silently work around — any other agent built against the same MCP tools
+// would hit the identical noise. Belongs fixed upstream (e.g. a real
+// updated_at on the issue), not patched here.
 func (p polledIssue) version() string {
 	if p.UpdatedAt != "" {
 		return p.UpdatedAt
@@ -150,7 +176,7 @@ func (p polledIssue) toTriggerPayload(cfg Config) TriggerPayload {
 		namespace = cfg.Poll.EntityNamespace
 	}
 	return TriggerPayload{
-		RootCauseID:     p.RootCauseID,
+		IssueID:         p.IssueID,
 		EntityID:        p.EntityID,
 		EntityName:      p.EntityName,
 		RootCauseName:   p.RootCauseName,
@@ -181,7 +207,7 @@ func parsePolledIssues(raw string) ([]polledIssue, error) {
 		desc, _ := m["description"].(map[string]any)
 
 		issues = append(issues, polledIssue{
-			RootCauseID:     firstString(m, "id", "root_cause_id", "issue_id", "objectId"),
+			IssueID:         firstString(m, "id", "issue_id", "objectId"),
 			EntityID:        firstString(entity, "id"),
 			EntityName:      firstString(entity, "name"),
 			EntityNamespace: firstString(m, "entity_namespace", "namespace"),

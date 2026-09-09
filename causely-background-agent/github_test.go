@@ -11,37 +11,37 @@ import (
 
 func TestFixBranchPrefix(t *testing.T) {
 	tests := []struct {
-		name        string
-		rootCauseID string
-		want        string
+		name    string
+		issueID string
+		want    string
 	}{
 		{
-			name:        "typical UUID root cause id",
-			rootCauseID: "32a3cbcc-15f2-4587-a015-06ed4470a7c5",
-			want:        "causely-fix/32a3cbcc-15f2-4587-a015-06ed4470a7c5",
+			name:    "typical UUID root cause id",
+			issueID: "32a3cbcc-15f2-4587-a015-06ed4470a7c5",
+			want:    "causely-fix/32a3cbcc-15f2-4587-a015-06ed4470a7c5",
 		},
 		{
-			name:        "characters unsafe for a branch name are sanitized",
-			rootCauseID: "rc/with spaces:and*stars",
-			want:        "causely-fix/rc-with-spaces-and-stars",
+			name:    "characters unsafe for a branch name are sanitized",
+			issueID: "rc/with spaces:and*stars",
+			want:    "causely-fix/rc-with-spaces-and-stars",
 		},
 		{
-			name:        "empty root cause id falls back to a stable placeholder",
-			rootCauseID: "",
-			want:        "causely-fix/unknown",
+			name:    "empty root cause id falls back to a stable placeholder",
+			issueID: "",
+			want:    "causely-fix/unknown",
 		},
 		{
-			name:        "same id always produces the same prefix (determinism, required for dedup to work)",
-			rootCauseID: "abc-123",
-			want:        "causely-fix/abc-123",
+			name:    "same id always produces the same prefix (determinism, required for dedup to work)",
+			issueID: "abc-123",
+			want:    "causely-fix/abc-123",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := fixBranchPrefix(tt.rootCauseID)
+			got := fixBranchPrefix(tt.issueID)
 			if got != tt.want {
-				t.Errorf("fixBranchPrefix(%q) = %q, want %q", tt.rootCauseID, got, tt.want)
+				t.Errorf("fixBranchPrefix(%q) = %q, want %q", tt.issueID, got, tt.want)
 			}
 		})
 	}

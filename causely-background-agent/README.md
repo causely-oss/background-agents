@@ -179,9 +179,11 @@ Kubernetes manifests, no Helm/chart dependency. Create the Secret out-of-band
   pairs) configured via `mcp_servers` in config.yaml land in the ConfigMap, not
   a Secret — fine for an unauthenticated server, be aware for an authenticated
   one.
-- Cost-state and poll-watermark persistence use whatever volume you mount at
-  `/data` — an `emptyDir` survives container restarts but not pod
-  recreation; use a PVC if you need the latter.
+- `/data` (investigation records, weekly cost state, poll watermark) is
+  backed by the PVC in `deploy/pvc.yaml`, which survives pod recreation —
+  apply it before `deployment.yaml`. If you deploy `deployment.yaml` without
+  it, Kubernetes will refuse to schedule the pod (no matching volume), rather
+  than silently falling back to ephemeral storage.
 - RBAC can't restrict a Role to only a Secret's key names, not its decoded
   values — `deploy/rbac.yaml` grants `get`/`list` on the full Secret object;
   the safety boundary that `kubectl_get_secret_keys` never returns decoded

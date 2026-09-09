@@ -147,9 +147,9 @@ func (g *githubClient) SearchCode(query string) (string, error) {
 // e.g. "causely-fix/32a3cbcc-15f2-4587-a015-06ed4470a7c5". Every fix attempt for
 // the same root cause shares this prefix, which is how findExistingFixPR locates
 // prior attempts to update instead of duplicating.
-func fixBranchPrefix(rootCauseID string) string {
+func fixBranchPrefix(issueID string) string {
 	var b strings.Builder
-	for _, r := range rootCauseID {
+	for _, r := range issueID {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
 			b.WriteRune(r)
@@ -193,8 +193,8 @@ func (g *githubClient) findExistingFixPR(branchPrefix string) (prURL string, bra
 // CreatePR applies the proposed changes and opens a GitHub PR, or — if a PR for
 // this root cause is already open — pushes the new changes onto its existing
 // branch and returns that PR's URL instead of opening a duplicate.
-func (g *githubClient) CreatePR(fix ProposedFix, rootCauseID string) (string, error) {
-	branchPrefix := fixBranchPrefix(rootCauseID)
+func (g *githubClient) CreatePR(fix ProposedFix, issueID string) (string, error) {
+	branchPrefix := fixBranchPrefix(issueID)
 
 	// A failure here is non-fatal: fall through and create a new PR rather than
 	// blocking remediation entirely on a dedup-check failure. Worst case is the

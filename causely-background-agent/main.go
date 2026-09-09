@@ -20,7 +20,7 @@ import (
 // Causely's real NotificationPayload, see notification_payload.go), the poll
 // loop (see poll.go), or a Slack "Fix it" button (see slack_actions.go).
 type TriggerPayload struct {
-	RootCauseID   string `json:"root_cause_id"`
+	IssueID       string `json:"issue_id"`
 	EntityID      string `json:"entity_id"`
 	EntityName    string `json:"entity_name"`
 	RootCauseName string `json:"root_cause_name"`
@@ -98,7 +98,7 @@ func main() {
 			return
 		}
 		payload := notification.toTriggerPayload()
-		if payload.RootCauseID == "" {
+		if payload.IssueID == "" {
 			http.Error(w, "objectId required", http.StatusBadRequest)
 			return
 		}

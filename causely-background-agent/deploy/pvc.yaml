@@ -1,0 +1,26 @@
+# PersistentVolumeClaim for causely-background-agent's /data — investigation
+# records, weekly cost state, and the poll watermark. Without this, they live
+# on an emptyDir and are wiped on every pod recreation (a redeploy, a node
+# eviction, `kubectl delete pod`) — not just a container restart within the
+# same pod. Confirmed live: a routine `kubectl rollout restart` during normal
+# iteration wiped the entire investigation-record history each time.
+#
+# 1Gi is generous for what's actually stored here (a slowly-growing JSONL log
+# plus two small state files) — bump storage if you expect a very high
+# investigation volume over a long retention window.
+#
+# No storageClassName is set, so this uses the cluster's default
+# StorageClass. Most real clusters (EKS, GKE, AKS) have one. A bare `kind`
+# cluster typically does NOT ship a default StorageClass — install one (e.g.
+# rancher/local-path-provisioner) or set storageClassName explicitly before
+# applying this there.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: causely-background-agent-data
+spec:
+  accessModes:
+    - ReadWriteOnce # fine for a single replica — see deployment.yaml's strategy: Recreate
+  resources:
+    requests:
+      storage: 1Gi

@@ -7,7 +7,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// checkRootCauseStillActive asks the Causely MCP server whether rootCauseID is
+// checkIssueStillActive asks the Causely MCP server whether issueID is
 // still an open issue before spending anything investigating it. A trigger can
 // reach this agent well after the root cause was detected — a delayed Slack
 // "Fix it" click, a manual/test POST /trigger, or simply an issue that resolved
@@ -20,8 +20,8 @@ import (
 // down (same caveat as poll.go's polledIssue), so a tool-call error or an
 // unparseable response lets the investigation proceed rather than being
 // silently blocked by a check this agent can't fully rely on.
-func checkRootCauseStillActive(client *mcpClient, rootCauseID string, log *zap.Logger) (skip bool, reason string) {
-	raw, err := client.CallTool("get_issue_details", map[string]any{"issue_id": rootCauseID})
+func checkIssueStillActive(client *mcpClient, issueID string, log *zap.Logger) (skip bool, reason string) {
+	raw, err := client.CallTool("get_issue_details", map[string]any{"issue_id": issueID})
 	if err != nil {
 		log.Warn("staleness check: get_issue_details failed, proceeding anyway", zap.Error(err))
 		return false, ""

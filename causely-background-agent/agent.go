@@ -54,7 +54,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 
 	startedAt := time.Now()
 	finish := func(ir InvestigationRecord) {
-		ir.RootCauseID = payload.RootCauseID
+		ir.IssueID = payload.IssueID
 		ir.EntityID = payload.EntityID
 		ir.EntityName = payload.EntityName
 		ir.RootCauseName = payload.RootCauseName
@@ -89,7 +89,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 	}
 
 	// The built-in causely MCP server is always cfg.MCPServers[0] — see resolveMCPServers.
-	if skip, reason := checkRootCauseStillActive(cfg.MCPServers[0].newClient(), payload.RootCauseID, log); skip {
+	if skip, reason := checkIssueStillActive(cfg.MCPServers[0].newClient(), payload.IssueID, log); skip {
 		log.Info("root cause already resolved, skipping investigation", zap.String("reason", reason))
 		finish(InvestigationRecord{Verdict: verdictSkippedStale, SkipReason: reason})
 		return
@@ -174,7 +174,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 		return
 	}
 
-	prURL, err := gh.CreatePR(*outcome.Fix, payload.RootCauseID)
+	prURL, err := gh.CreatePR(*outcome.Fix, payload.IssueID)
 	if err != nil {
 		log.Warn("failed to create PR", zap.Error(err))
 		_ = slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS,
@@ -515,6 +515,20 @@ Your job:
      repo right now) against what the fix would set it to. If the live state already matches,
      there is nothing to change — the issue already self-resolved, or the diagnosis is a false
      positive, or it's a live/deployed config drift rather than a code bug.
+   - kubectl_get_secret_keys returns a Secret's key NAMES ONLY, never its decoded values — you
+     have no way to see Secret content. Never assert a claim about what a Secret currently
+     contains, or that one "has been updated," unless you got that from a source that actually
+     shows content (e.g. the repo's own manifest/values file, or a ConfigMap). If a symptom
+     cleared and you can't otherwise explain why, say the mechanism is unconfirmed rather than
+     inventing a plausible-sounding one.
+   - Before citing source code as evidence that a specific caller does (or doesn't do)
+     something — e.g. "this BRPOP call has no timeout" — confirm you found the actual call site
+     (the real client method invocation, e.g. grep for ".BRPop(" not just the string "brpop"),
+     and read its actual arguments. Code that merely recognizes or pattern-matches a command
+     name (an observability span-classifier, a log-text symptom matcher) is NOT the same as the
+     application code that issues that command — don't cite the former as if it were the
+     latter. If you can't find the real call site, say so explicitly rather than presenting an
+     inference as a confirmed finding.
 3. If, after this verification, you find no genuine defect — the flagged exception is
    deliberately caught and handled by design, or the issue has already fully self-resolved
    with the live state already matching what any fix would produce — call no_action_needed.
@@ -547,7 +561,7 @@ func runClaudeLoop(cfg Config, payload TriggerPayload, sources []mcpSource, gh *
 
 	messages := []anthropicMessage{{
 		Role:    "user",
-		Content: fmt.Sprintf("Investigate root cause '%s' (id: %s) on entity '%s'. Use available tools, then call recommend_remediation, propose_fix, or no_action_needed.", payload.RootCauseName, payload.RootCauseID, payload.EntityName),
+		Content: fmt.Sprintf("Investigate root cause '%s' (id: %s) on entity '%s'. Use available tools, then call recommend_remediation, propose_fix, or no_action_needed.", payload.RootCauseName, payload.IssueID, payload.EntityName),
 	}}
 
 	system := buildSystemPrompt(payload, cfg.GitHubRepo, sources, kc != nil)

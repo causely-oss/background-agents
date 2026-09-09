@@ -15,7 +15,7 @@ import (
 // time — instead of only observed anecdotally per-incident in logs and Slack.
 type InvestigationRecord struct {
 	// Identity
-	RootCauseID   string `json:"root_cause_id"`
+	IssueID       string `json:"issue_id"`
 	EntityID      string `json:"entity_id,omitempty"`
 	EntityName    string `json:"entity_name,omitempty"`
 	RootCauseName string `json:"root_cause_name,omitempty"`

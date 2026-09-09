@@ -80,7 +80,7 @@ func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec
 		}
 
 		var val struct {
-			RootCauseID   string `json:"root_cause_id"`
+			IssueID       string `json:"issue_id"`
 			EntityID      string `json:"entity_id"`
 			EntityName    string `json:"entity_name"`
 			RootCauseName string `json:"root_cause_name"`
@@ -94,7 +94,7 @@ func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec
 		}
 
 		payload := TriggerPayload{
-			RootCauseID:   val.RootCauseID,
+			IssueID:       val.IssueID,
 			EntityID:      val.EntityID,
 			EntityName:    val.EntityName,
 			RootCauseName: val.RootCauseName,

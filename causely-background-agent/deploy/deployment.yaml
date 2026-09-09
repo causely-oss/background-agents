@@ -1,4 +1,7 @@
 # Deployment + Service for causely-background-agent. Requires:
+#   - pvc.yaml applied first — /data (investigation records, weekly cost
+#     state, poll watermark) is backed by a PersistentVolumeClaim so it
+#     survives pod recreation, not just container restarts.
 #   - rbac.yaml applied (ServiceAccount + ClusterRole + a RoleBinding per
 #     target namespace) for the kubectl_* tools to be available at all — if
 #     skipped, the agent starts fine but omits those tools (see kube.go).
@@ -35,6 +38,17 @@ spec:
         app: causely-background-agent
     spec:
       serviceAccountName: causely-background-agent
+      # fsGroup: 3000 matches the "causely" group (gid 3000) the Dockerfile's
+      # non-root user runs as. Without this, a freshly-provisioned PVC (e.g.
+      # EBS via gp2) mounts /data root-owned, and the app — writing
+      # investigation records, weekly cost state, and the poll watermark —
+      # gets silent permission-denied errors on every write. Confirmed live:
+      # a manual write to /data failed with "Permission denied" before this
+      # was added. emptyDir didn't have this problem (kubelet creates it
+      # already owned by the pod), which is why it went unnoticed until the
+      # PVC switch.
+      securityContext:
+        fsGroup: 3000
       containers:
         - name: causely-background-agent
           image: docker.io/causelyai/causely-background-agent:latest
@@ -82,7 +96,8 @@ spec:
           configMap:
             name: causely-background-agent
         - name: data
-          emptyDir: {} # swap for a PVC if you need cost/poll state to survive pod recreation, not just container restarts
+          persistentVolumeClaim:
+            claimName: causely-background-agent-data
 ---
 apiVersion: v1
 kind: Service
