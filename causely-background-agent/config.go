@@ -68,6 +68,28 @@ type Config struct {
 	// network, not a same-repo internal call, so unlike the old design it can't
 	// lean on network topology alone for protection.
 	TriggerSharedSecret string `env:"TRIGGER_SHARED_SECRET"`
+
+	// AllowUnauthenticatedTrigger opts into starting with no TRIGGER_SHARED_SECRET
+	// set — refused by loadConfig otherwise, since an unauthenticated /trigger on a
+	// network-reachable service means anyone who can reach it can spend this
+	// instance's Anthropic budget and, in act mode, open PRs / mutate the cluster.
+	// Only meant for local/demo use against a throwaway cluster.
+	AllowUnauthenticatedTrigger bool `yaml:"allow_unauthenticated_trigger"`
+
+	// AllowUnauthenticatedSlackActions opts into starting with no
+	// SLACK_SIGNING_SECRET set — refused by loadConfig otherwise, since an
+	// unverified POST /slack/actions means anyone who can reach the service can
+	// forge a "Fix it" click. Only meant for local/demo use.
+	AllowUnauthenticatedSlackActions bool `yaml:"allow_unauthenticated_slack_actions"`
+
+	// MaxConcurrentInvestigations bounds how many investigations can run at
+	// once. Without this, a burst of near-simultaneous triggers (many issues
+	// firing at once, or a webhook + poll racing on the same event) could all
+	// pass the weekly-budget check before any of them records spend, so the
+	// aggregate cap only bounds worst-case overspend to roughly this many
+	// investigations' worth rather than being airtight. <= 0 disables the
+	// limit — not recommended.
+	MaxConcurrentInvestigations int `yaml:"max_concurrent_investigations" env-default:"5"`
 }
 
 // PollConfig configures the poll-based trigger source (see poll.go).
@@ -115,6 +137,18 @@ func loadConfig(path string) (Config, error) {
 
 	if (cfg.CauselyMCPClientID == "") != (cfg.CauselyMCPClientSecret == "") {
 		return Config{}, fmt.Errorf("CAUSELY_MCP_CLIENT_ID and CAUSELY_MCP_CLIENT_SECRET must both be set, or neither")
+	}
+
+	// Fail closed by default: a network-reachable /trigger or /slack/actions
+	// with no way to verify the caller means anyone who can reach this service
+	// can spend its Anthropic budget and, in act mode, open PRs or mutate the
+	// cluster. Set the corresponding secret, or explicitly opt into the risk
+	// (e.g. local/demo use) via the matching allow_unauthenticated_* config field.
+	if cfg.TriggerSharedSecret == "" && !cfg.AllowUnauthenticatedTrigger {
+		return Config{}, fmt.Errorf("TRIGGER_SHARED_SECRET is not set — POST /trigger would accept unauthenticated requests from anyone who can reach this service; set it, or set allow_unauthenticated_trigger: true in config.yaml to explicitly accept that risk")
+	}
+	if cfg.SlackSigningSecret == "" && !cfg.AllowUnauthenticatedSlackActions {
+		return Config{}, fmt.Errorf("SLACK_SIGNING_SECRET is not set — POST /slack/actions would accept unverified requests; set it, or set allow_unauthenticated_slack_actions: true in config.yaml to explicitly accept that risk")
 	}
 
 	servers, err := resolveMCPServers(cfg.CauselyMCPURL, cfg.CauselyMCPToken, cfg.CauselyMCPClientID, cfg.CauselyMCPClientSecret, cfg.MCPServers)

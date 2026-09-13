@@ -75,6 +75,12 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 		return
 	}
 
+	// Bounds how many investigations run concurrently, so a burst of
+	// near-simultaneous triggers can't all pass the exceeded() check below
+	// before any of them records spend — see withConcurrencyLimit in cost.go.
+	weekly.acquire()
+	defer weekly.release()
+
 	if weekly.exceeded() {
 		reason := fmt.Sprintf("weekly cost cap ($%.2f) already reached", weekly.limitUSD)
 		log.Warn("weekly cost cap already reached, skipping investigation",

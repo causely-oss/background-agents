@@ -46,8 +46,9 @@ deploy this — nothing here is specific to any one tenant or environment.
 - An [Anthropic API key](https://console.anthropic.com/)
 - A GitHub token (read + PR-write) for the one repo this instance should
   investigate and fix
-- A Slack bot token (required to start even in `observe` mode, but never
-  actually used to post unless you switch to `act` mode)
+- A Slack bot token and signing secret (both required to start even in
+  `observe` mode; the token is never actually used to post unless you switch
+  to `act` mode)
 - `kubectl` access to the cluster you're deploying into
 
 ```bash
@@ -59,7 +60,10 @@ kubectl create secret generic causely-background-agent \
   --from-literal=anthropic-api-key="$ANTHROPIC_API_KEY" \
   --from-literal=github-token="$GITHUB_TOKEN" \
   --from-literal=slack-bot-token="$SLACK_BOT_TOKEN" \
+  --from-literal=slack-signing-secret="$SLACK_SIGNING_SECRET" \
   --from-literal=trigger-shared-secret="$(openssl rand -hex 32)"
+# trigger-shared-secret and slack-signing-secret are required — the agent
+# refuses to start without them (see Securing /trigger below).
 
 # 3. Copy deploy/configmap.example.yaml, set causely_mcp_url and github_repo
 #    at minimum, then apply it
@@ -139,7 +143,12 @@ Two independent caps exist (`config.yaml`, see `cost.go`):
   investigations this instance runs; once hit, new investigations are
   skipped entirely (recorded with verdict `skipped_budget`) until spend ages
   out of the window. Persisted to `cost_state_file` if set, so a restart
-  doesn't reset the counter.
+  doesn't reset the counter. This check happens *before* an investigation
+  starts, not as an atomic reservation, so `max_concurrent_investigations`
+  (default `5`) bounds how many investigations can be in flight at once —
+  without it, a burst of near-simultaneous triggers could all pass the check
+  before any of them records spend, overshooting the weekly cap by more than
+  one investigation's worth.
 
 In our own testing, a single investigation typically cost in the
 **$0.4–$3.5** range, varying with how much digging Claude needed to do
@@ -190,6 +199,15 @@ decoded values, since Secret content flowing into Claude's context risks it
 being echoed into a PR body, Slack message, or the investigation record. If
 RBAC isn't applied, the agent starts fine and simply omits these tools for
 that run — see `newKubeClient` in `kube.go`.
+
+Everything these tools *do* return — ConfigMap data, pod logs, resource
+specs — is not similarly filtered: it's sent to Anthropic's API as part of
+the investigation (see [Cost](#cost)) and may be echoed into a PR body, Slack
+message, or the investigation record, the same as source code Claude reads
+via GitHub. If your ConfigMaps or logs can contain sensitive data (tokens
+embedded in a log line, an internal hostname you don't want to leave the
+cluster), account for that before granting broad read access, the same way
+you would for any tool that lets an LLM read cluster state.
 
 ## Extending with other observability sources (Prometheus, Grafana, etc.)
 
@@ -265,14 +283,22 @@ working," not just per-incident Slack messages. See
 Non-secret settings come from a YAML config file (`-config`, default
 `/config/config.yaml`); see `deploy/configmap.example.yaml` for every field.
 Credentials come from environment variables only — `ANTHROPIC_API_KEY`,
-`GITHUB_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` (optional),
+`GITHUB_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
 `CAUSELY_MCP_TOKEN` (optional, bearer-token auth to the Causely MCP server),
 `CAUSELY_MCP_CLIENT_ID` + `CAUSELY_MCP_CLIENT_SECRET` (optional, HTTP Basic
 auth instead — for a Causely tenant with Frontegg auth enabled, which
 exchanges and caches a Frontegg access token server-side so this agent never
 has to fetch/refresh one itself; set both or neither, and they take
-precedence over `CAUSELY_MCP_TOKEN` if both are set), `TRIGGER_SHARED_SECRET`
-(optional, but you should set it — see below).
+precedence over `CAUSELY_MCP_TOKEN` if both are set), `TRIGGER_SHARED_SECRET`.
+
+**`TRIGGER_SHARED_SECRET` and `SLACK_SIGNING_SECRET` are required — the agent
+refuses to start without them.** An unauthenticated `/trigger` or an
+unverified `/slack/actions` on a network-reachable service means anyone who
+can reach it can spend this instance's Anthropic budget and, in `act` mode,
+open PRs or mutate the cluster. For local/demo use against a throwaway
+cluster only, set `allow_unauthenticated_trigger: true` /
+`allow_unauthenticated_slack_actions: true` in `config.yaml` to explicitly
+accept that risk instead.
 
 `allowed_severities` (config.yaml, e.g. `["High", "Critical"]`) restricts
 every trigger source to root causes at those severities — see `scope.go`'s
@@ -304,9 +330,9 @@ regardless of what the watermark does.
 ## Securing `/trigger`
 
 This is a standalone, network-reachable service — unlike an in-repo call, it
-can't lean on network topology alone. Set `TRIGGER_SHARED_SECRET` and require
-callers to send `Authorization: Bearer <secret>`. If unset, `/trigger` logs a
-startup warning and accepts unauthenticated requests.
+can't lean on network topology alone. `TRIGGER_SHARED_SECRET` is required;
+the agent refuses to start without it (see [Configuration](#configuration)).
+Set it and require callers to send `Authorization: Bearer <secret>`.
 
 ## Build & run
 

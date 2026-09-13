@@ -75,13 +75,42 @@ type weeklyBudget struct {
 	mu          sync.Mutex
 	limitUSD    float64 // <= 0 disables the cap
 	entries     []costEntry
-	persistPath string // optional; empty disables cross-restart persistence
+	persistPath string        // optional; empty disables cross-restart persistence
+	sem         chan struct{} // nil = no concurrency limit; see withConcurrencyLimit
 }
 
 func newWeeklyBudget(limitUSD float64, persistPath string) *weeklyBudget {
 	w := &weeklyBudget{limitUSD: limitUSD, persistPath: persistPath}
 	w.load()
 	return w
+}
+
+// withConcurrencyLimit bounds how many investigations may run at once.
+// exceeded() is a check, not a reservation: without this, an unbounded burst
+// of concurrent triggers could all observe the weekly cap as not-yet-reached
+// and start before any of them records spend, overshooting
+// max_weekly_cost_usd by far more than one investigation's worth. Capping
+// concurrency bounds that overshoot to roughly maxConcurrent investigations'
+// worth instead of being unbounded. maxConcurrent <= 0 leaves it unbounded.
+func (w *weeklyBudget) withConcurrencyLimit(maxConcurrent int) *weeklyBudget {
+	if maxConcurrent > 0 {
+		w.sem = make(chan struct{}, maxConcurrent)
+	}
+	return w
+}
+
+// acquire blocks until a concurrency slot is free. Call before running an
+// investigation; always pair with a deferred release.
+func (w *weeklyBudget) acquire() {
+	if w.sem != nil {
+		w.sem <- struct{}{}
+	}
+}
+
+func (w *weeklyBudget) release() {
+	if w.sem != nil {
+		<-w.sem
+	}
 }
 
 func (w *weeklyBudget) load() {

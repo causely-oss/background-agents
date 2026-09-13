@@ -40,6 +40,24 @@ data:
     max_cost_usd: 5
     max_weekly_cost_usd: 50
 
+    # Bounds how many investigations can run at once. max_weekly_cost_usd is
+    # checked before an investigation starts, not reserved atomically, so
+    # without this cap a burst of near-simultaneous triggers could all pass
+    # that check before any of them records spend, overshooting the weekly
+    # cap by more than one investigation's worth. <= 0 disables the limit —
+    # not recommended.
+    max_concurrent_investigations: 5
+
+    # This agent refuses to start unless TRIGGER_SHARED_SECRET (env var, see
+    # deploy/deployment.yaml) and SLACK_SIGNING_SECRET are both set — an
+    # unauthenticated /trigger or unverified /slack/actions on a
+    # network-reachable service would let anyone who can reach it spend this
+    # instance's Anthropic budget and, in act mode, open PRs or mutate the
+    # cluster. Only set these to true for local/demo use against a
+    # throwaway cluster, never in a real deployment.
+    allow_unauthenticated_trigger: false
+    allow_unauthenticated_slack_actions: false
+
     # Weekly spend is tracked in memory unless this is set, in which case it's
     # persisted here across restarts. If you set this, also mount a volume at
     # its directory in deployment.yaml (a small emptyDir is fine for a single

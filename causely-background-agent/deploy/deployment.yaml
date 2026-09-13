@@ -7,17 +7,21 @@
 #     skipped, the agent starts fine but omits those tools (see kube.go).
 #   - a ConfigMap named causely-background-agent (see configmap.example.yaml)
 #   - a Secret named causely-background-agent with keys: anthropic-api-key, github-token,
-#     slack-bot-token, slack-signing-secret (optional), causely-mcp-token
+#     slack-bot-token, slack-signing-secret, causely-mcp-token
 #     (optional, bearer-token auth to the Causely MCP server), causely-mcp-client-id
 #     + causely-mcp-client-secret (optional, HTTP Basic auth to the Causely MCP
 #     server instead — for a tenant with Frontegg auth enabled; set both or
 #     neither, and prefer these over causely-mcp-token if the tenant supports
-#     both), trigger-shared-secret (optional but strongly recommended — see
-#     README.md). Create it out-of-band, e.g.:
+#     both), trigger-shared-secret. trigger-shared-secret and
+#     slack-signing-secret are REQUIRED — the agent refuses to start without
+#     them unless config.yaml explicitly opts into
+#     allow_unauthenticated_trigger / allow_unauthenticated_slack_actions (see
+#     README.md). Create the Secret out-of-band, e.g.:
 #       kubectl create secret generic causely-background-agent \
 #         --from-literal=anthropic-api-key=... \
 #         --from-literal=github-token=... \
 #         --from-literal=slack-bot-token=... \
+#         --from-literal=slack-signing-secret=... \
 #         --from-literal=trigger-shared-secret=$(openssl rand -hex 32)
 apiVersion: apps/v1
 kind: Deployment
@@ -62,7 +66,7 @@ spec:
             - name: SLACK_BOT_TOKEN
               valueFrom: { secretKeyRef: { name: causely-background-agent, key: slack-bot-token } }
             - name: SLACK_SIGNING_SECRET
-              valueFrom: { secretKeyRef: { name: causely-background-agent, key: slack-signing-secret, optional: true } }
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: slack-signing-secret } }
             - name: CAUSELY_MCP_TOKEN
               valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-token, optional: true } }
             - name: CAUSELY_MCP_CLIENT_ID
@@ -70,7 +74,7 @@ spec:
             - name: CAUSELY_MCP_CLIENT_SECRET
               valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-client-secret, optional: true } }
             - name: TRIGGER_SHARED_SECRET
-              valueFrom: { secretKeyRef: { name: causely-background-agent, key: trigger-shared-secret, optional: true } }
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: trigger-shared-secret } }
           ports:
             - name: webserver
               containerPort: 8090

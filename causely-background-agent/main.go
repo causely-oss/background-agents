@@ -61,11 +61,18 @@ func main() {
 		logger.Info("mcp server configured",
 			zap.String("name", s.Name), zap.String("url", s.URL), zap.Bool("has_token", s.Token != ""))
 	}
+	// loadConfig already refused to start with an unset TRIGGER_SHARED_SECRET /
+	// SLACK_SIGNING_SECRET unless the operator explicitly opted in via
+	// allow_unauthenticated_trigger / allow_unauthenticated_slack_actions —
+	// these warnings only fire in that deliberate-opt-in case.
 	if cfg.TriggerSharedSecret == "" {
-		logger.Warn("TRIGGER_SHARED_SECRET is not set — POST /trigger accepts unauthenticated requests from anyone who can reach this service")
+		logger.Warn("allow_unauthenticated_trigger is set — POST /trigger accepts unauthenticated requests from anyone who can reach this service")
+	}
+	if cfg.SlackSigningSecret == "" {
+		logger.Warn("allow_unauthenticated_slack_actions is set — POST /slack/actions accepts unverified requests from anyone who can reach this service")
 	}
 
-	weekly := newWeeklyBudget(cfg.MaxWeeklyCostUSD, cfg.CostStateFile)
+	weekly := newWeeklyBudget(cfg.MaxWeeklyCostUSD, cfg.CostStateFile).withConcurrencyLimit(cfg.MaxConcurrentInvestigations)
 	rec := newRecorder(cfg.InvestigationRecordPath, logger)
 	kc, kcErr := newKubeClient()
 	logKubeClientInit(logger, kc, kcErr)

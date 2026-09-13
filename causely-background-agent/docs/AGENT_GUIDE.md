@@ -60,9 +60,9 @@ where the data comes from and what metadata is available downstream:
 
 | Trigger | Enabled by | Root-cause data source | Slack thread info? | Notes |
 |---|---|---|---|---|
-| **Webhook** (`POST /trigger`) | Always on; secured by `TRIGGER_SHARED_SECRET` | Causely mediator's existing `NotificationPayload` (`notification_payload.go`) — the same shape Slack/Teams destinations already get | No — mediator's generic-webhook delivery is separate from its Slack-specific delivery, so `SlackChannel`/`SlackThreadTS` are empty | Wiring this up is a **mediator config change, not a code change** — see §2 |
+| **Webhook** (`POST /trigger`) | Always on; requires `TRIGGER_SHARED_SECRET` (`loadConfig` refuses to start without it, unless `allow_unauthenticated_trigger: true`) | Causely mediator's existing `NotificationPayload` (`notification_payload.go`) — the same shape Slack/Teams destinations already get | No — mediator's generic-webhook delivery is separate from its Slack-specific delivery, so `SlackChannel`/`SlackThreadTS` are empty | Wiring this up is a **mediator config change, not a code change** — see §2 |
 | **Poll** | `poll.enabled: true` in `config.yaml` | Calls Causely MCP's `get_issues` tool directly on an interval | No (no mediator involved) | Tracks a per-root-cause watermark (`poll.go`) so an unchanged, still-open issue isn't re-investigated every cycle; a severity shift, symptom-count change, or new occurrence does re-trigger |
-| **Slack `/slack/actions`** | Always on; verified by `SLACK_SIGNING_SECRET` if set | The Slack "Fix it" button's `value` payload (round-tripped from whatever mediator put there) | Yes — this is the one path with real channel + thread, so `act`-mode replies thread correctly | Requires a Slack app configured to POST interactive payloads here |
+| **Slack `/slack/actions`** | Always on; requires `SLACK_SIGNING_SECRET` (`loadConfig` refuses to start without it, unless `allow_unauthenticated_slack_actions: true`) | The Slack "Fix it" button's `value` payload (round-tripped from whatever mediator put there) | Yes — this is the one path with real channel + thread, so `act`-mode replies thread correctly | Requires a Slack app configured to POST interactive payloads here |
 
 Practical implication: if you want `act`-mode Slack replies threaded to the
 original alert, use the Slack button path, not the webhook path.
@@ -73,7 +73,7 @@ Every run — skipped (out of scope, budget exceeded), failed, or completed —
 appends one JSON line to `investigation_record_path` (`investigation_record.go`).
 Fields worth knowing:
 
-- **Identity**: `root_cause_id`, `entity_id`, `entity_name`, `root_cause_name`, `severity`
+- **Identity**: `issue_id`, `entity_id`, `entity_name`, `root_cause_name`, `severity`
 - **Provenance**: `trigger_source` (`webhook` | `poll` | `slack_action`), `action_mode`
 - **Cost**: `input_tokens`, `output_tokens`, `cost_usd`
 - **Shape**: `tool_calls` (server + tool name + error flag, per call), `tool_call_count`
@@ -97,6 +97,12 @@ Two independent caps, both in `agent.go`/`cost.go`:
   runs, checked *before* starting a new investigation so a recurring root
   cause can't blow the budget one under-cap incident at a time. Persisted to
   `cost_state_file` if set, so a pod restart doesn't reset the counter.
+  This check-then-start isn't a reservation: a burst of near-simultaneous
+  triggers could all observe the cap as not-yet-reached before any of them
+  records spend. `max_concurrent_investigations` (default 5, in `cost.go:
+  weeklyBudget.withConcurrencyLimit`) bounds how many investigations can be
+  in that window at once, capping worst-case overshoot to roughly that many
+  investigations' worth rather than leaving it unbounded.
 
 ---
 
@@ -245,8 +251,8 @@ exactly the following inputs; everything else below is mechanical.
 | 5 | `causely_mcp_url` | This tenant's Causely MCP endpoint (hosted: `https://api.causely.app/mcp`; self-run: in-cluster address) | Config, defaults to a placeholder localhost URL — **not enforced**, override it for anything real |
 | 6a | `CAUSELY_MCP_TOKEN` | Bearer-token auth to the Causely MCP server, on a tenant with auth disabled or expecting a static bearer token | Secret, optional |
 | 6b | `CAUSELY_MCP_CLIENT_ID` + `CAUSELY_MCP_CLIENT_SECRET` | HTTP Basic auth to the Causely MCP server instead of 6a — for a tenant with Frontegg auth enabled (e.g. staging). The server exchanges/caches a Frontegg access token itself, so this pair is static and never needs refreshing. Set both or neither; takes precedence over `CAUSELY_MCP_TOKEN` if both are set. | Secret, optional (required if the tenant's MCP endpoint has `authentication.disabled: false` — check the tenant's `api` ConfigMap, `services.MCP.config.authentication`) |
-| 7 | `TRIGGER_SHARED_SECRET` | Bearer-auth for `POST /trigger` | Secret, **strongly recommended** — without it `/trigger` accepts unauthenticated requests from anyone who can reach the service |
-| 8 | `SLACK_SIGNING_SECRET` | Verifies `/slack/actions` payloads are really from Slack | Secret, optional but recommended if using the Slack button trigger |
+| 7 | `TRIGGER_SHARED_SECRET` | Bearer-auth for `POST /trigger` | Secret, **required** — `loadConfig` refuses to start without it unless `allow_unauthenticated_trigger: true` is set in `config.yaml` (local/demo use only) |
+| 8 | `SLACK_SIGNING_SECRET` | Verifies `/slack/actions` payloads are really from Slack | Secret, **required** — `loadConfig` refuses to start without it unless `allow_unauthenticated_slack_actions: true` is set in `config.yaml` (local/demo use only) |
 | 9 | `action_mode` | `observe` or `act` | Config, defaults to `observe` — deploy in `observe` first |
 | 10 | `scope_namespaces` / `causely.ai/github-repo` label | Which entities this instance is allowed to act on, if running more than one instance | Config, optional |
 | 11 | `deploy/rbac.yaml` applied, mutate RoleBinding namespace matching `scope_namespaces` | Grants `kubectl_get`/`kubectl_get_secret_keys`/`kubectl_logs` **cluster-wide** (diagnosis shouldn't be namespace-blind — a root cause's dependency is often outside its own namespace), and, in `act` mode, `kubectl_rollout_restart`/`kubectl_scale` scoped per-namespace (mutation stays narrow even though reads are broad) | Optional — omitting it just omits these tools, no startup failure |

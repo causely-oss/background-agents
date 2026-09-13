@@ -18,9 +18,11 @@ func writeTestConfig(t *testing.T, yaml string) string {
 func setRequiredSecretEnv(t *testing.T) {
 	t.Helper()
 	for k, v := range map[string]string{
-		"ANTHROPIC_API_KEY": "ak",
-		"GITHUB_TOKEN":      "gt",
-		"SLACK_BOT_TOKEN":   "sbt",
+		"ANTHROPIC_API_KEY":     "ak",
+		"GITHUB_TOKEN":          "gt",
+		"SLACK_BOT_TOKEN":       "sbt",
+		"TRIGGER_SHARED_SECRET": "tss",
+		"SLACK_SIGNING_SECRET":  "sss",
 	} {
 		t.Setenv(k, v)
 	}
@@ -135,6 +137,65 @@ func TestLoadConfig_FullCauselyMCPClientCredentialsAccepted(t *testing.T) {
 	}
 	if cfg.MCPServers[0].ClientID != "id" || cfg.MCPServers[0].ClientSecret != "secret" {
 		t.Errorf("causely server = %+v, want client_id/client_secret set", cfg.MCPServers[0])
+	}
+}
+
+// TestLoadConfig_MissingTriggerSharedSecretErrors guards fail-closed-by-default:
+// a network-reachable /trigger with no way to authenticate callers means anyone
+// who can reach this service can spend its Anthropic budget, so loadConfig must
+// refuse to start rather than silently accepting unauthenticated requests.
+func TestLoadConfig_MissingTriggerSharedSecretErrors(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "ak")
+	t.Setenv("GITHUB_TOKEN", "gt")
+	t.Setenv("SLACK_BOT_TOKEN", "sbt")
+	t.Setenv("SLACK_SIGNING_SECRET", "sss")
+	path := writeTestConfig(t, `github_repo: "org/repo"`)
+
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("expected an error when TRIGGER_SHARED_SECRET is unset and allow_unauthenticated_trigger is not set")
+	}
+}
+
+// TestLoadConfig_AllowUnauthenticatedTriggerOptsOut guards the explicit escape
+// hatch for local/demo use: an operator who deliberately sets
+// allow_unauthenticated_trigger: true gets the old permissive behavior back.
+func TestLoadConfig_AllowUnauthenticatedTriggerOptsOut(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "ak")
+	t.Setenv("GITHUB_TOKEN", "gt")
+	t.Setenv("SLACK_BOT_TOKEN", "sbt")
+	t.Setenv("SLACK_SIGNING_SECRET", "sss")
+	path := writeTestConfig(t, "github_repo: \"org/repo\"\nallow_unauthenticated_trigger: true\n")
+
+	if _, err := loadConfig(path); err != nil {
+		t.Fatalf("loadConfig() error = %v, want no error when allow_unauthenticated_trigger is true", err)
+	}
+}
+
+// TestLoadConfig_MissingSlackSigningSecretErrors mirrors the TRIGGER_SHARED_SECRET
+// case for /slack/actions: an unverified request could forge a "Fix it" click.
+func TestLoadConfig_MissingSlackSigningSecretErrors(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "ak")
+	t.Setenv("GITHUB_TOKEN", "gt")
+	t.Setenv("SLACK_BOT_TOKEN", "sbt")
+	t.Setenv("TRIGGER_SHARED_SECRET", "tss")
+	path := writeTestConfig(t, `github_repo: "org/repo"`)
+
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("expected an error when SLACK_SIGNING_SECRET is unset and allow_unauthenticated_slack_actions is not set")
+	}
+}
+
+// TestLoadConfig_AllowUnauthenticatedSlackActionsOptsOut mirrors
+// TestLoadConfig_AllowUnauthenticatedTriggerOptsOut for the Slack path.
+func TestLoadConfig_AllowUnauthenticatedSlackActionsOptsOut(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "ak")
+	t.Setenv("GITHUB_TOKEN", "gt")
+	t.Setenv("SLACK_BOT_TOKEN", "sbt")
+	t.Setenv("TRIGGER_SHARED_SECRET", "tss")
+	path := writeTestConfig(t, "github_repo: \"org/repo\"\nallow_unauthenticated_slack_actions: true\n")
+
+	if _, err := loadConfig(path); err != nil {
+		t.Fatalf("loadConfig() error = %v, want no error when allow_unauthenticated_slack_actions is true", err)
 	}
 }
 
