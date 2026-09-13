@@ -99,7 +99,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 	slack := newSlackClient(cfg.SlackBotToken)
 
 	// 1. Load tools from every configured MCP server (Causely, and whatever
-	// else is set via MCP_SERVERS_JSON — see mcp_config.go).
+	// else is listed under mcp_servers in config.yaml — see mcp_config.go).
 	sources := loadMCPSources(cfg, log)
 
 	// 2. Run the agent loop: Claude investigates via MCP + GitHub, then either

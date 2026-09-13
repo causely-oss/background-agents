@@ -44,7 +44,7 @@ func TestPollOnce_SendsActiveOnlyAndNamespaceFilter(t *testing.T) {
 	}
 }
 
-func TestPollOnce_OmitsNamespaceFilterWhenScopeNamespacesUnset(t *testing.T) {
+func TestPollOnce_OmitsNamespaceFilterButDefaultsSeverityWhenUnset(t *testing.T) {
 	var gotParams map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -65,8 +65,35 @@ func TestPollOnce_OmitsNamespaceFilterWhenScopeNamespacesUnset(t *testing.T) {
 	if _, ok := gotParams["namespace_names"]; ok {
 		t.Errorf("namespace_names = %v, want it omitted when ScopeNamespaces is unset", gotParams["namespace_names"])
 	}
-	if _, ok := gotParams["severities"]; ok {
-		t.Errorf("severities = %v, want it omitted when AllowedSeverities is unset", gotParams["severities"])
+	// severities is NOT omitted: poll defaults to High/Critical when
+	// AllowedSeverities is unset — see TestPollSeverities_DefaultsToHighCritical.
+	sev, ok := gotParams["severities"].([]any)
+	if !ok || len(sev) != 2 || sev[0] != "High" || sev[1] != "Critical" {
+		t.Errorf("severities = %v, want the default [\"High\", \"Critical\"] when AllowedSeverities is unset", gotParams["severities"])
+	}
+}
+
+// TestPollSeverities_DefaultsToHighCritical guards poll's safe-by-default
+// severity filter: unlike the webhook/Slack paths (inScope in scope.go),
+// which only filter by severity when explicitly configured, poll runs
+// continuously and pays for every genuinely new occurrence it dispatches on
+// — so an operator who never touches allowed_severities still gets a
+// sensible default instead of investigating every Low-severity flicker.
+func TestPollSeverities_DefaultsToHighCritical(t *testing.T) {
+	got := pollSeverities(Config{})
+	if len(got) != 2 || got[0] != "High" || got[1] != "Critical" {
+		t.Errorf("pollSeverities(unset) = %v, want [\"High\", \"Critical\"]", got)
+	}
+}
+
+// TestPollSeverities_OperatorOverrideWins guards the escape hatch: an
+// operator who explicitly sets allowed_severities (even to something that
+// includes Low/Medium) must get exactly that, not the default.
+func TestPollSeverities_OperatorOverrideWins(t *testing.T) {
+	cfg := Config{AllowedSeverities: []string{"Low", "Medium", "High", "Critical"}}
+	got := pollSeverities(cfg)
+	if len(got) != 4 {
+		t.Errorf("pollSeverities(explicit) = %v, want the operator's own list unmodified", got)
 	}
 }
 

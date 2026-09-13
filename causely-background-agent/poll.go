@@ -60,6 +60,26 @@ func (w *pollWatermark) persist() error {
 	return os.Rename(tmp, w.path)
 }
 
+// defaultPollSeverities is what poll filters get_issues to when the operator
+// hasn't set allowed_severities explicitly. Poll runs continuously and pays
+// for an investigation on every genuinely new occurrence it sees, so a safe
+// default matters here in a way it doesn't for the webhook/Slack paths
+// (inScope in scope.go doesn't filter by severity at all unless configured)
+// — those are driven by a human or by mediator's own notification config,
+// not by this agent repeatedly asking "anything new?" on a timer.
+var defaultPollSeverities = []string{"High", "Critical"}
+
+// pollSeverities returns cfg.AllowedSeverities if the operator set it,
+// otherwise defaultPollSeverities. To poll every severity deliberately, set
+// allowed_severities to the full list (e.g. ["Low","Medium","High","Critical"])
+// — an empty/unset value is treated as "use the safe default," not "no filter."
+func pollSeverities(cfg Config) []string {
+	if len(cfg.AllowedSeverities) > 0 {
+		return cfg.AllowedSeverities
+	}
+	return defaultPollSeverities
+}
+
 // runPollLoop is a trigger source alongside the push webhook: on cfg.Poll.Interval,
 // it asks the Causely MCP server for open issues directly instead of waiting for
 // mediator to fire a one-time webhook. This exists because a webhook only reflects
@@ -101,10 +121,11 @@ func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *poll
 	// baseline and an elevated value while merely toggling active/inactive never
 	// even gets fetched at the low-severity end of that flicker — closing off the
 	// exact mechanism that produced duplicate paid investigations of the same
-	// already-known issue (see AllowedSeverities in config.go).
-	if len(cfg.AllowedSeverities) > 0 {
-		args["severities"] = cfg.AllowedSeverities
-	}
+	// already-known issue. See pollSeverities for why poll defaults to
+	// High/Critical even when allowed_severities is unset, unlike the
+	// webhook/Slack paths (inScope in scope.go), which don't filter by
+	// severity at all unless the operator explicitly configures it.
+	args["severities"] = pollSeverities(cfg)
 	raw, err := client.CallTool("get_issues", args)
 	if err != nil {
 		logger.Warn("poll: get_issues failed", zap.Error(err))

@@ -23,12 +23,18 @@ data:
 
     # Optional allowlist of severities this instance will act on (values:
     # Low, Medium, High, Critical — matching Causely's own enum). Applies to
-    # every trigger source (webhook, poll, Slack), and is also passed
-    # straight through to poll's get_issues call so low-severity issues
-    # aren't even fetched. Recommended if you see the same chronic,
-    # flapping-severity issue trigger multiple paid investigations in a
-    # short window — e.g. ["High", "Critical"] filters out that noise
-    # entirely rather than relying on poll's watermark to dedupe it.
+    # every trigger source (webhook, poll, Slack).
+    #
+    # NOTE: if poll.enabled is true and this is left empty, poll defaults to
+    # ["High", "Critical"] on its own (see pollSeverities in poll.go) — poll
+    # runs continuously and pays for every genuinely new occurrence it
+    # dispatches on, so leaving it unfiltered by default would mean every
+    # Low-severity flicker on a chronic issue becomes a paid investigation.
+    # The webhook/Slack paths do NOT get this default; they're driven by a
+    # human or by mediator's own notification config, not by this agent
+    # polling on a timer, so an empty list there truly means "no filter."
+    # To make poll consider every severity too, set this explicitly to
+    # ["Low", "Medium", "High", "Critical"].
     allowed_severities: []
 
     max_cost_usd: 5

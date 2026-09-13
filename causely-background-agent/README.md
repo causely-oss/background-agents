@@ -17,10 +17,21 @@ Causely root cause  →  causely-background-agent  →  Claude tool-use loop
   (webhook push,          /trigger         │
    or polled directly)  /slack/actions     ├─ Causely MCP tools (root cause,
                                             │  logs, topology, evidence)
+                                            ├─ any additional MCP servers you
+                                            │  configure (Prometheus, Grafana,
+                                            │  your own internal tools, ...)
                                             ├─ GitHub read/write tools
-                                            └─ recommend_remediation, or
-                                               propose_fix → GitHub PR
+                                            ├─ kubectl (if RBAC is granted)
+                                            └─ recommend_remediation,
+                                               propose_fix → GitHub PR, or
+                                               no_action_needed
 ```
+
+Causely and GitHub are the only two sources built in; every other tool here
+is optional and additive. See
+[Extending with other observability sources](#extending-with-other-observability-sources-prometheus-grafana-etc)
+below for how to add more MCP servers, and [kubectl access](#kubectl-access)
+for the live-cluster tools.
 
 ## Quick start
 
@@ -113,6 +124,52 @@ All three feed the same investigation path and the same
   quality without side effects.
 - **`act`** — does it for real.
 
+## Cost
+
+**Every investigation costs real money, in every mode — including
+`observe`.** `observe` only gates the *side effects* (opening a PR, posting
+to Slack); the Claude tool-use loop itself always runs for real and always
+spends real Anthropic API tokens. There is no free "dry run" of the
+investigation itself.
+
+Two independent caps exist (`config.yaml`, see `cost.go`):
+- `max_cost_usd` (default `5`) — aborts a single investigation if it exceeds
+  this. Partial findings up to that point are still recorded.
+- `max_weekly_cost_usd` (default `50`) — a rolling 7-day cap across *all*
+  investigations this instance runs; once hit, new investigations are
+  skipped entirely (recorded with verdict `skipped_budget`) until spend ages
+  out of the window. Persisted to `cost_state_file` if set, so a restart
+  doesn't reset the counter.
+
+In our own testing, a single investigation typically cost in the
+**$0.4–$3.5** range, varying with how much digging Claude needed to do
+(a quick config check vs. tracing a bug through source across several
+files) — treat this as a rough sense of scale, not a guarantee; it depends
+on your repo's size, how deep an investigation goes, and Anthropic's current
+pricing (`cost.go`'s pricing table is a hardcoded snapshot that needs
+periodic manual updating against
+[Anthropic's published pricing](https://www.anthropic.com/pricing) — it will
+silently drift stale otherwise).
+
+The biggest cost lever if you enable `poll` mode is `allowed_severities` —
+poll runs continuously and pays for every genuinely new occurrence it acts
+on, so it **defaults to `["High", "Critical"]`** even if you never set it
+(see [Configuration](#configuration) below). Scoping `scope_namespaces` and
+keeping `poll.interval` reasonable (default `5m`) are the other two main
+levers. For the webhook trigger, the equivalent lever is on Causely's
+mediator side: configure its notification destination to only push
+High/Critical-severity root causes to this agent in the first place, rather
+than relying on this agent to filter after the fact.
+
+## Model
+
+The Claude model is **currently hardcoded** (`claudeModel` in `cost.go`) —
+there is no config field or environment variable to choose a different
+model today. Model selection (and the accompanying per-model pricing table
+`cost.go` uses for cost tracking) is planned to become configurable in a
+future version. If you need a different model right now, that requires a
+source change.
+
 ## kubectl access
 
 If `deploy/rbac.yaml` is applied, the agent gets `kubectl_get`,
@@ -134,11 +191,29 @@ being echoed into a PR body, Slack message, or the investigation record. If
 RBAC isn't applied, the agent starts fine and simply omits these tools for
 that run — see `newKubeClient` in `kube.go`.
 
-## Extending with other observability sources (Prometheus, etc.)
+## Extending with other observability sources (Prometheus, Grafana, etc.)
 
 `mcp_servers` in config.yaml already supports arbitrary extra MCP servers
-beyond the built-in Causely one — point one at a Prometheus (or any other)
-MCP server the same way the docs show for Grafana, no code change required.
+beyond the built-in Causely one — **no code change required**. Each entry
+becomes a set of tools Claude can call, prefixed by that server's `name` (so
+a `prometheus` entry's tools show up as `prometheus__query_range`, etc. —
+see `buildTools` in `agent.go`). You can add as many as you like:
+
+```yaml
+mcp_servers:
+  - name: prometheus
+    url: https://prometheus.example.com/mcp
+    description: "raw metrics, PromQL queries"
+  - name: grafana
+    url: https://grafana.example.com/mcp
+    description: "dashboards and panel data"
+    token: "..."  # optional bearer token — see the Known limitations note below
+```
+
+The `description` field matters: it's what tells Claude *when* to reach for
+each source (surfaced in the system prompt alongside every other configured
+source), so a specific, distinguishing description is worth writing rather
+than leaving it blank.
 
 ## A third terminal outcome: no_action_needed
 
@@ -201,14 +276,30 @@ precedence over `CAUSELY_MCP_TOKEN` if both are set), `TRIGGER_SHARED_SECRET`
 
 `allowed_severities` (config.yaml, e.g. `["High", "Critical"]`) restricts
 every trigger source to root causes at those severities — see `scope.go`'s
-`inScope` and `poll.go`. Recommended once you notice a chronic, recurring
-issue whose severity flickers between a baseline and an elevated value as it
-toggles active/inactive: poll's watermark falls back to severity when
-Causely's `get_issues` doesn't provide an `updated_at`, so that flicker alone
-can trigger duplicate paid investigations of an issue that hasn't actually
-changed. Filtering by severity (also passed straight through to `get_issues`,
-so low-severity issues aren't even fetched) closes that off regardless of
-what the watermark does.
+`inScope` and `poll.go`.
+
+**If `poll.enabled: true` and this is left unset, poll defaults to
+`["High", "Critical"]` on its own** (`pollSeverities` in `poll.go`) — poll
+runs continuously and pays for every genuinely new occurrence it dispatches
+on, so an operator who never touches this setting still gets a sane default
+instead of paying to investigate every low-severity blip. To make poll
+consider every severity, set this explicitly to
+`["Low", "Medium", "High", "Critical"]`. The webhook and Slack paths do
+**not** get this default — an unset `allowed_severities` there truly means
+"no severity filter," since those are driven by a human or by mediator's own
+notification config, not by this agent polling on a timer; if you want the
+same High/Critical-only behavior for webhook-triggered investigations,
+configure that filter on mediator's notification destination itself (which
+severities it forwards to this agent), not here.
+
+This setting also closes a real noise source: a chronic, recurring issue's
+severity can flicker between a baseline and an elevated value as it merely
+toggles active/inactive, and poll's watermark (falling back to severity when
+Causely's `get_issues` doesn't provide an `updated_at`) can read that
+flicker as "changed," paying for a second investigation of an event that
+hadn't actually changed. Filtering by severity (passed straight through to
+`get_issues`, so low-severity issues aren't even fetched) closes that off
+regardless of what the watermark does.
 
 ## Securing `/trigger`
 
@@ -239,9 +330,9 @@ plain Kubernetes manifests under `deploy/` — no Helm/chart dependency.
 ## Known limitations
 
 - No RC-type allowlist — every root cause type triggers an investigation.
-- `MCP_SERVERS_JSON`-style extra MCP server tokens (and client_id/client_secret
-  pairs) configured via `mcp_servers` in config.yaml land in the ConfigMap, not
-  a Secret — fine for an unauthenticated server, be aware for an authenticated
+- Extra MCP server tokens (and client_id/client_secret pairs) configured via
+  `mcp_servers` in config.yaml land in the ConfigMap, not a Secret — fine for
+  an unauthenticated server, be aware for an authenticated
   one.
 - `/data` (investigation records, weekly cost state, poll watermark) is
   backed by the PVC in `deploy/pvc.yaml`, which survives pod recreation —
