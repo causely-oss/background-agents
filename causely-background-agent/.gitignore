@@ -1,0 +1,6 @@
+/causely-background-agent
+
+# Rendered from deploy/configmap.example.yaml per the Quick start steps —
+# operators often paste live values (URLs, repo names) in here even though
+# secrets belong in the Secret, not the ConfigMap; never commit it.
+/deploy/configmap.yaml
