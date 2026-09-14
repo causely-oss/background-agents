@@ -90,7 +90,13 @@ func (c *mcpClient) post(method string, params any) (json.RawMessage, error) {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(payload, &result); err != nil {
-		return nil, fmt.Errorf("mcp decode: %w", err)
+		// Include a prefix of the actual response so a non-JSON body (an auth
+		// gateway's plain-text "unauthorized", an HTML error page, a proxy
+		// timeout page) is diagnosable from the error alone — confirmed live,
+		// a decode failure with only the json error ("invalid character 'u'
+		// looking for beginning of value") gave no way to tell what the
+		// server actually sent.
+		return nil, fmt.Errorf("mcp decode: %w (response: %q)", err, truncate(string(payload), 300))
 	}
 	if result.Error != nil {
 		return nil, fmt.Errorf("mcp error: %s", result.Error.Message)
