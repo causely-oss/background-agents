@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	agentName                = "causely-root-cause-investigator"
-	agentWorkflowName        = "investigate-causely-root-cause"
+	agentName                = "causely-issue-investigator"
+	agentWorkflowName        = "investigate-causely-issue"
 	telemetryInstrumentation = "github.com/causely-oss/background-agents/causely-background-agent"
 )
 
