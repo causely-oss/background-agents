@@ -23,16 +23,16 @@ type TriggerPayload struct {
 	IssueID       string `json:"issue_id"`
 	EntityID      string `json:"entity_id"`
 	EntityName    string `json:"entity_name"`
-	RootCauseName string `json:"root_cause_name"`
+	DiagnosisName string `json:"diagnosis_name"`
 	Severity      string `json:"severity"`
 	Description   string `json:"description"`
 	Remediation   string `json:"remediation"`
 	SlackChannel  string `json:"slack_channel"`
 	SlackThreadTS string `json:"slack_thread_ts"`
 
-	// Scope hints from the root cause's entity labels, used by inScope() in
-	// scope.go to decide whether this agent instance should act on this root
-	// cause at all.
+	// Scope hints from the Issue's entity labels, used by inScope() in
+	// scope.go to decide whether this agent instance should act on this
+	// Issue at all.
 	EntityNamespace string `json:"entity_namespace"`
 	GitHubRepoLabel string `json:"github_repo_label"`
 }

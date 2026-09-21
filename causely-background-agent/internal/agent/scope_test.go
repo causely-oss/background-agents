@@ -76,7 +76,7 @@ func TestInScope(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "regression: root cause on an out-of-scope entity must be rejected even with no repo label",
+			name: "regression: issue on an out-of-scope entity must be rejected even with no repo label",
 			cfg:  Config{GitHubRepo: "org/repo", ScopeNamespaces: []string{"team-a"}},
 			payload: TriggerPayload{
 				EntityName:      "monitoring/some-service",
@@ -106,7 +106,7 @@ func TestInScope(t *testing.T) {
 			name: "regression: the exact scenario found live — a chronic issue's severity flickers Low after a diagnosis clears, and must be rejected when only High/Critical are allowed",
 			cfg:  Config{GitHubRepo: "org/repo", AllowedSeverities: []string{"High", "Critical"}},
 			payload: TriggerPayload{
-				RootCauseName: "Congested",
+				DiagnosisName: "Congested",
 				Severity:      "Low",
 			},
 			want: false,

@@ -143,9 +143,9 @@ func (g *githubClient) SearchCode(query string) (string, error) {
 	return fmt.Sprintf("%d total matches, showing %d:\n%s", res.TotalCount, len(lines), strings.Join(lines, "\n")), nil
 }
 
-// fixBranchPrefix returns the stable branch-name prefix for a given root cause,
+// fixBranchPrefix returns the stable branch-name prefix for a given issue,
 // e.g. "causely-fix/32a3cbcc-15f2-4587-a015-06ed4470a7c5". Every fix attempt for
-// the same root cause shares this prefix, which is how findExistingFixPR locates
+// the same issue shares this prefix, which is how findExistingFixPR locates
 // prior attempts to update instead of duplicating.
 func fixBranchPrefix(issueID string) string {
 	var b strings.Builder
@@ -165,9 +165,9 @@ func fixBranchPrefix(issueID string) string {
 }
 
 // findExistingFixPR looks for an already-open PR from a prior attempt at fixing
-// this same root cause, identified by its branch-name prefix. Without this,
-// every trigger for the same root_cause_id opens a brand-new PR — a real root
-// cause can fire this webhook multiple times before it's resolved.
+// this same issue, identified by its branch-name prefix. Without this,
+// every trigger for the same issue_id opens a brand-new PR — a real recurring
+// issue can fire this webhook multiple times before it's resolved.
 func (g *githubClient) findExistingFixPR(branchPrefix string) (prURL string, branch string, err error) {
 	raw, err := g.do("GET", fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=100", g.owner, g.repo), nil)
 	if err != nil {
@@ -191,7 +191,7 @@ func (g *githubClient) findExistingFixPR(branchPrefix string) (prURL string, bra
 }
 
 // CreatePR applies the proposed changes and opens a GitHub PR, or — if a PR for
-// this root cause is already open — pushes the new changes onto its existing
+// this issue is already open — pushes the new changes onto its existing
 // branch and returns that PR's URL instead of opening a duplicate.
 func (g *githubClient) CreatePR(fix ProposedFix, issueID string) (string, error) {
 	branchPrefix := fixBranchPrefix(issueID)
@@ -233,7 +233,7 @@ func (g *githubClient) CreatePR(fix ProposedFix, issueID string) (string, error)
 	}
 	_ = json.Unmarshal(raw, &ref)
 
-	// Create branch, named so future attempts at the same root cause can find it.
+	// Create branch, named so future attempts at the same issue can find it.
 	branch := fmt.Sprintf("%s-%d", branchPrefix, time.Now().Unix())
 	_, err = g.do("POST", fmt.Sprintf("/repos/%s/%s/git/refs", g.owner, g.repo), map[string]any{
 		"ref": "refs/heads/" + branch,

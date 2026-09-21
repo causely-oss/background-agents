@@ -10,7 +10,7 @@ most: what it is, how it's wired end-to-end, and how to deploy it.
 
 ## 1. What is causely-background-agent
 
-A standalone Go service that turns a Causely-detected Kubernetes root cause
+A standalone Go service that turns a Causely-detected Kubernetes Issue
 into either an immediate remediation recommendation or a GitHub pull request
 with a code-level fix. It is a **reference implementation** on top of
 Causely's MCP server — not a required part of using Causely, and not
@@ -20,11 +20,11 @@ working example and as Causely's own dogfood instance.
 
 At a high level, one investigation run does:
 
-1. Receive a trigger (see §2) identifying a root cause + entity.
+1. Receive a trigger (see §2) identifying an Issue + entity.
 2. Load tool lists from every configured MCP server (Causely's, plus any
    extras like Grafana).
 3. Run a Claude tool-use loop (`agent.go: runClaudeLoop`) where Claude calls
-   MCP tools (root cause detail, topology, logs, metrics) and GitHub
+   MCP tools (issue/diagnosis detail, topology, logs, metrics) and GitHub
    read-only tools (`read_file`, `list_directory`, `search_code`) to build a
    picture of the incident.
 4. Claude terminates the loop by calling exactly one of two tools:
@@ -58,10 +58,10 @@ All three produce the same internal `TriggerPayload` (`main.go`) and feed the
 same investigation path and the same `InvestigationRecord`. They differ in
 where the data comes from and what metadata is available downstream:
 
-| Trigger | Enabled by | Root-cause data source | Slack thread info? | Notes |
+| Trigger | Enabled by | Issue data source | Slack thread info? | Notes |
 |---|---|---|---|---|
 | **Webhook** (`POST /trigger`) | Always on; requires `TRIGGER_SHARED_SECRET` (`loadConfig` refuses to start without it, unless `allow_unauthenticated_trigger: true`) | Causely mediator's existing `NotificationPayload` (`notification_payload.go`) — the same shape Slack/Teams destinations already get | No — mediator's generic-webhook delivery is separate from its Slack-specific delivery, so `SlackChannel`/`SlackThreadTS` are empty | Wiring this up is a **mediator config change, not a code change** — see §2 |
-| **Poll** | `poll.enabled: true` in `config.yaml` | Calls Causely MCP's `get_issues` tool directly on an interval | No (no mediator involved) | Tracks a per-root-cause watermark (`poll.go`) so an unchanged, still-open issue isn't re-investigated every cycle; a severity shift, symptom-count change, or new occurrence does re-trigger |
+| **Poll** | `poll.enabled: true` in `config.yaml` | Calls Causely MCP's `get_issues` tool directly on an interval | No (no mediator involved) | Tracks a per-Issue watermark (`poll.go`) so an unchanged, still-open issue isn't re-investigated every cycle; a severity shift, symptom-count change, or new occurrence does re-trigger |
 | **Slack `/slack/actions`** | Always on; requires `SLACK_SIGNING_SECRET` (`loadConfig` refuses to start without it, unless `allow_unauthenticated_slack_actions: true`) | The Slack "Fix it" button's `value` payload (round-tripped from whatever mediator put there) | Yes — this is the one path with real channel + thread, so `act`-mode replies thread correctly | Requires a Slack app configured to POST interactive payloads here |
 
 Practical implication: if you want `act`-mode Slack replies threaded to the
@@ -73,7 +73,7 @@ Every run — skipped (out of scope, budget exceeded), failed, or completed —
 appends one JSON line to `investigation_record_path` (`investigation_record.go`).
 Fields worth knowing:
 
-- **Identity**: `issue_id`, `entity_id`, `entity_name`, `root_cause_name`, `severity`
+- **Identity**: `issue_id`, `entity_id`, `entity_name`, `diagnosis_name`, `severity`
 - **Provenance**: `trigger_source` (`webhook` | `poll` | `slack_action`), `action_mode`
 - **Cost**: `input_tokens`, `output_tokens`, `cost_usd`
 - **Shape**: `tool_calls` (server + tool name + error flag, per call), `tool_call_count`
@@ -111,7 +111,7 @@ Two independent caps, both in `agent.go`/`cost.go`:
 ```
 Causely mediator                 causely-background-agent                  external services
 ─────────────────                ─────────────────────────                  ─────────────────
-root cause detected
+Issue detected
   │
   ├─ Slack/Teams notify  (existing, unrelated to this agent)
   │
@@ -176,13 +176,13 @@ before wiring, since this agent's repo doesn't own that contract.)
   iterations (`agent.go: runClaudeLoop`), model `claude-sonnet-4-6`
   (`cost.go: claudeModel`).
 - Tools presented to Claude = every MCP server's tools (prefixed
-  `<server-name>__`, e.g. `causely__get_root_cause`) + 5 built-ins:
+  `<server-name>__`, e.g. `causely__get_issue_details`) + 5 built-ins:
   `read_file`, `list_directory`, `search_code`, `propose_fix`,
   `recommend_remediation`.
 - The system prompt (`buildSystemPrompt`) explicitly biases Claude toward
   `recommend_remediation` first, and only toward `propose_fix` (which costs a
   PR, code changes, review overhead) when an immediate action can't resolve
-  the root cause.
+  the underlying issue.
 - Model pricing is hardcoded in `cost.go: modelPricing` — needs periodic
   manual re-verification against https://www.anthropic.com/pricing since
   there's no dynamic pricing lookup.
@@ -198,7 +198,7 @@ before wiring, since this agent's repo doesn't own that contract.)
 - Dedup: before creating a new PR, `findExistingFixPR` looks for an
   already-open PR whose branch starts with `causely-fix/<root-cause-id>-` —
   if found, new changes are pushed onto that branch instead of opening a
-  duplicate PR (a recurring root cause fires this webhook multiple times
+  duplicate PR (a recurring issue fires this webhook multiple times
   before it's actually resolved).
 - One GitHub token (`GITHUB_TOKEN`), one repo (`github_repo` in config) per
   agent instance — this agent cannot fan out writes across multiple repos.
@@ -218,10 +218,10 @@ before wiring, since this agent's repo doesn't own that contract.)
 ### Scope enforcement (multi-instance safety)
 
 `scope.go: inScope` decides whether *this* deployed instance is allowed to
-act on a given root cause, since mediator-side routing to the right instance
+act on a given issue, since mediator-side routing to the right instance
 is best-effort, not a guarantee:
 
-1. If the root cause's entity carries a `causely.ai/github-repo` label, it
+1. If the Issue's entity carries a `causely.ai/github-repo` label, it
    must case-insensitively match this instance's configured `github_repo`.
 2. If `scope_namespaces` is configured (non-empty), the entity's
    `causely.ai/namespace` label must be in that list.
@@ -255,7 +255,7 @@ exactly the following inputs; everything else below is mechanical.
 | 8 | `SLACK_SIGNING_SECRET` | Verifies `/slack/actions` payloads are really from Slack | Secret, **required** — `loadConfig` refuses to start without it unless `allow_unauthenticated_slack_actions: true` is set in `config.yaml` (local/demo use only) |
 | 9 | `action_mode` | `observe` or `act` | Config, defaults to `observe` — deploy in `observe` first |
 | 10 | `scope_namespaces` / `causely.ai/github-repo` label | Which entities this instance is allowed to act on, if running more than one instance | Config, optional |
-| 11 | `deploy/rbac.yaml` applied, mutate RoleBinding namespace matching `scope_namespaces` | Grants `kubectl_get`/`kubectl_get_secret_keys`/`kubectl_logs` **cluster-wide** (diagnosis shouldn't be namespace-blind — a root cause's dependency is often outside its own namespace), and, in `act` mode, `kubectl_rollout_restart`/`kubectl_scale` scoped per-namespace (mutation stays narrow even though reads are broad) | Optional — omitting it just omits these tools, no startup failure |
+| 11 | `deploy/rbac.yaml` applied, mutate RoleBinding namespace matching `scope_namespaces` | Grants `kubectl_get`/`kubectl_get_secret_keys`/`kubectl_logs` **cluster-wide** (diagnosis shouldn't be namespace-blind — an Issue's dependency is often outside its own namespace), and, in `act` mode, `kubectl_rollout_restart`/`kubectl_scale` scoped per-namespace (mutation stays narrow even though reads are broad) | Optional — omitting it just omits these tools, no startup failure |
 | 12 | `deploy/pvc.yaml` applied, before `deployment.yaml` | Backs `/data` (investigation records, weekly cost state, poll watermark) with real storage so it survives pod recreation, not just a container restart — `deployment.yaml` references it by claim name | **Required** — `deployment.yaml` won't schedule without a matching PVC; no cluster default StorageClass (e.g. a bare `kind` cluster) means installing one first |
 
 ### Step-by-step

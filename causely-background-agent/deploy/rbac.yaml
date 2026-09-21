@@ -3,7 +3,7 @@
 # kubectl tools are simply omitted — no fatal error, see newKubeClient.
 #
 # Split into two ClusterRoles, bound differently, on purpose:
-#   - Read (get/list/logs) is bound CLUSTER-WIDE. A root cause's actual
+#   - Read (get/list/logs) is bound CLUSTER-WIDE. An Issue's actual
 #     dependency is often outside the namespace of the service it's degrading
 #     (found dogfooding: a gateway issue in "causely" needed to inspect
 #     Prometheus in "monitoring" — RBAC scoped to just "causely" blocked

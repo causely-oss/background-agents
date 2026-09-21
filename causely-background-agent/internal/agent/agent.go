@@ -47,7 +47,7 @@ func investigationCompletionAttributes(ir InvestigationRecord, costBudgetUSD flo
 // actually modify a file. A ProposedFix with no changes, or where every
 // change's Search equals its Replace, produces a byte-identical PR — most
 // commonly because the repo already matches the intended state and the real
-// root cause is a live/deployed config drift rather than a code bug.
+// issue is a live/deployed config drift rather than a code bug.
 func fixHasRealChange(fix ProposedFix) bool {
 	for _, c := range fix.Changes {
 		if c.Search != c.Replace {
@@ -66,7 +66,7 @@ func fixHasRealChange(fix ProposedFix) bool {
 // measured later instead of only observed anecdotally in logs/Slack.
 func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *weeklyBudget, rec *recorder, kc *kubeClient, triggerSource string) {
 	log := logger.With(
-		zap.String("rc", payload.RootCauseName),
+		zap.String("diagnosis", payload.DiagnosisName),
 		zap.String("entity", payload.EntityName),
 		zap.String("severity", payload.Severity),
 		zap.String("trigger_source", triggerSource),
@@ -79,7 +79,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 		ir.IssueID = payload.IssueID
 		ir.EntityID = payload.EntityID
 		ir.EntityName = payload.EntityName
-		ir.RootCauseName = payload.RootCauseName
+		ir.DiagnosisName = payload.DiagnosisName
 		ir.Severity = payload.Severity
 		ir.TriggerSource = triggerSource
 		ir.ActionMode = cfg.ActionMode
@@ -99,7 +99,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 	acting := cfg.ActionMode == actionModeAct
 
 	if ok, reason := inScope(cfg, payload); !ok {
-		log.Info("root cause out of scope for this agent instance, skipping", zap.String("reason", reason))
+		log.Info("Issue out of scope for this agent instance, skipping", zap.String("reason", reason))
 		finish(InvestigationRecord{Verdict: verdictSkippedScope, SkipReason: reason})
 		return
 	}
@@ -117,7 +117,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 		if acting {
 			slack := newSlackClient(cfg.SlackBotToken)
 			_ = slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS,
-				fmt.Sprintf("⚠️ causely-background-agent skipped investigating %s: %s", payload.RootCauseName, reason))
+				fmt.Sprintf("⚠️ causely-background-agent skipped investigating %s: %s", payload.DiagnosisName, reason))
 		}
 		finish(InvestigationRecord{Verdict: verdictSkippedBudget, SkipReason: reason})
 		return
@@ -125,7 +125,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 
 	// The built-in causely MCP server is always cfg.MCPServers[0] — see resolveMCPServers.
 	if skip, reason := checkIssueStillActive(cfg.MCPServers[0].newClient(), payload.IssueID, log); skip {
-		log.Info("root cause already resolved, skipping investigation", zap.String("reason", reason))
+		log.Info("Issue already resolved, skipping investigation", zap.String("reason", reason))
 		finish(InvestigationRecord{Verdict: verdictSkippedStale, SkipReason: reason})
 		return
 	}
@@ -185,7 +185,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 		if acting {
 			_ = slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS,
 				fmt.Sprintf("⚠️ causely-background-agent failed to investigate %s: %s\n\n💰 Cost: $%.4f%s",
-					payload.RootCauseName, err, tracker.spentUSD, partialFindingsSuffix(outcome.Summary, err)))
+					payload.DiagnosisName, err, tracker.spentUSD, partialFindingsSuffix(outcome.Summary, err)))
 		}
 		finish(withUsage(InvestigationRecord{Verdict: verdictFailed, Error: err.Error(), Summary: outcome.Summary}))
 		return
@@ -197,8 +197,8 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 	// there's nothing to remediate or fix.
 	if outcome.Fix == nil && outcome.Remediation == "" {
 		if acting {
-			msg := fmt.Sprintf("✅ *Root cause*: %s\n\n%s\n\nNo action needed: %s\n\n💰 Cost: $%.4f",
-				payload.RootCauseName, outcome.Summary, outcome.NoActionReasoning, tracker.spentUSD)
+			msg := fmt.Sprintf("✅ *Diagnosis*: %s\n\n%s\n\nNo action needed: %s\n\n💰 Cost: $%.4f",
+				payload.DiagnosisName, outcome.Summary, outcome.NoActionReasoning, tracker.spentUSD)
 			if err := slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS, msg); err != nil {
 				log.Warn("failed to post to slack", zap.Error(err))
 			}
@@ -217,8 +217,8 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 	// recommendation (if acting) and stop; there's no PR to open.
 	if outcome.Fix == nil {
 		if acting {
-			msg := fmt.Sprintf("🔍 *Root cause*: %s\n\n%s\n\n⚡ *Recommended immediate remediation*: %s\n\n💰 Cost: $%.4f",
-				payload.RootCauseName, outcome.Summary, outcome.Remediation, tracker.spentUSD)
+			msg := fmt.Sprintf("🔍 *Diagnosis*: %s\n\n%s\n\n⚡ *Recommended immediate remediation*: %s\n\n💰 Cost: $%.4f",
+				payload.DiagnosisName, outcome.Summary, outcome.Remediation, tracker.spentUSD)
 			if err := slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS, msg); err != nil {
 				log.Warn("failed to post to slack", zap.Error(err))
 			}
@@ -248,7 +248,7 @@ func runAgent(logger *zap.Logger, cfg Config, payload TriggerPayload, weekly *we
 	log.Info("PR created", zap.String("url", prURL))
 
 	// 4. Reply in the Slack thread.
-	msg := fmt.Sprintf("🔍 *Root cause*: %s\n\n%s\n\n🔧 Fix PR: %s\n\n💰 Cost: $%.4f", payload.RootCauseName, outcome.Summary, prURL, tracker.spentUSD)
+	msg := fmt.Sprintf("🔍 *Diagnosis*: %s\n\n%s\n\n🔧 Fix PR: %s\n\n💰 Cost: $%.4f", payload.DiagnosisName, outcome.Summary, prURL, tracker.spentUSD)
 	if err := slack.PostToThread(payload.SlackChannel, payload.SlackThreadTS, msg); err != nil {
 		log.Warn("failed to post to slack", zap.Error(err))
 	}
@@ -406,7 +406,7 @@ var proposefixSchema = json.RawMessage(`{
 var recommendRemediationSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "summary": {"type": "string", "description": "what you found investigating the root cause"},
+    "summary": {"type": "string", "description": "what you found investigating the issue"},
     "recommended_action": {"type": "string", "description": "the immediate remediation to take right now (e.g. restart, rollback, scale up, revert a config) — not a code change"}
   },
   "required": ["recommended_action"]
@@ -415,7 +415,7 @@ var recommendRemediationSchema = json.RawMessage(`{
 var noActionNeededSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
-    "summary": {"type": "string", "description": "what you found investigating the root cause"},
+    "summary": {"type": "string", "description": "what you found investigating the issue"},
     "reasoning": {"type": "string", "description": "why no remediation or fix is warranted — e.g. the exception is already caught and handled by design (cite the file/lines), or the issue already fully self-resolved with the live state already matching what any fix would produce"}
   },
   "required": ["reasoning"]
@@ -461,7 +461,7 @@ func buildTools(sources []mcpSource, repo string, kubectlAvailable, acting bool)
 		// exactly one of them should be called, whichever fits the finding.
 		anthropicTool{
 			Name:        "propose_fix",
-			Description: "Submit a proposed long-term code fix, opening a GitHub PR. Call this only when the root cause is a genuine code-level bug that an immediate remediation can't address.",
+			Description: "Submit a proposed long-term code fix, opening a GitHub PR. Call this only when the underlying issue is a genuine code-level bug that an immediate remediation can't address.",
 			InputSchema: proposefixSchema,
 		},
 		anthropicTool{
@@ -540,7 +540,7 @@ func buildSystemPrompt(payload TriggerPayload, repo string, sources []mcpSource,
 
 	return fmt.Sprintf(`You are an SRE agent investigating a production incident.
 
-Causely has detected a root cause: %s on service %s (severity: %s).
+Causely has detected an issue: %s on service %s (severity: %s).
 Description: %s
 
 Available tools (assembled by remediator from the configured MCP servers — tool names are
@@ -561,8 +561,8 @@ as a pointer to where to look, not as a conclusion to restate.
 
 Your job:
 1. Use the available tools above to investigate what happened — build a clear picture of the
-   root cause and blast radius before recommending anything. Pick the source whose description
-   matches what you need (e.g. causely__ for root-cause and topology data, grafana__ for raw
+   issue and blast radius before recommending anything. Pick the source whose description
+   matches what you need (e.g. causely__ for issue/diagnosis and topology data, grafana__ for raw
    metrics/dashboards, if configured).
 2. Before concluding there's a genuine defect, verify it — don't accept Causely's own defect
    classification and description at face value:
@@ -600,7 +600,7 @@ Your job:
 4. Otherwise, immediate remediation is preferred. If restarting, rolling back, scaling, or
    reverting a config resolves the issue, call recommend_remediation with that action — do not
    touch code for something an immediate action already fixes.
-5. Only pursue a long-term code fix if the root cause is a genuine code-level bug that an
+5. Only pursue a long-term code fix if the underlying issue is a genuine code-level bug that an
    immediate remediation can't address. In that case: use search_code to jump straight to the
    relevant file(s) in repository %s — prefer it over list_directory when you have a symbol
    name, error string, or config key to search for; this is a large monorepo and blind
@@ -609,7 +609,7 @@ Your job:
 
 Call exactly one of recommend_remediation, propose_fix, or no_action_needed to finish. Be
 specific — propose_fix.changes must contain exact strings that appear in the code.`,
-		payload.RootCauseName, payload.EntityName, payload.Severity,
+		payload.DiagnosisName, payload.EntityName, payload.Severity,
 		payload.Description, describeMCPSources(sources), kubectlNote, repo)
 }
 
@@ -624,7 +624,7 @@ func runClaudeLoop(ctx context.Context, cfg Config, payload TriggerPayload, sour
 
 	messages := []anthropicMessage{{
 		Role:    "user",
-		Content: fmt.Sprintf("Investigate root cause '%s' (id: %s) on entity '%s'. Use available tools, then call recommend_remediation, propose_fix, or no_action_needed.", payload.RootCauseName, payload.IssueID, payload.EntityName),
+		Content: fmt.Sprintf("Investigate issue '%s' (id: %s) on entity '%s'. Use available tools (e.g. causely__get_issue_details) to pull full evidence for this issue, then call recommend_remediation, propose_fix, or no_action_needed.", payload.DiagnosisName, payload.IssueID, payload.EntityName),
 	}}
 
 	system := buildSystemPrompt(payload, cfg.GitHubRepo, sources, kc != nil)
@@ -744,7 +744,7 @@ func runClaudeLoop(ctx context.Context, cfg Config, payload TriggerPayload, sour
 				if !fixHasRealChange(fix) {
 					// Every change is a no-op (search == replace, or no changes at all) —
 					// most commonly seen when the repo already matches the desired end
-					// state and the actual root cause is a live/deployed config drift, not
+					// state and the actual issue is a live/deployed config drift, not
 					// a code bug. Reject and let Claude reconsider rather than silently
 					// terminating the loop with a PR-worthy verdict that would open an
 					// empty, misleading PR in act mode.

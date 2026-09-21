@@ -81,7 +81,7 @@ func TestBuildTools_PrefixesEachMCPSourceByItsName(t *testing.T) {
 			Name: "causely",
 			Tools: []mcpToolDef{
 				{Name: "get_logs", Description: "logs"},
-				{Name: "get_root_cause_details", Description: "rcd"},
+				{Name: "get_issue_details", Description: "rcd"},
 			},
 		},
 		{
@@ -99,7 +99,7 @@ func TestBuildTools_PrefixesEachMCPSourceByItsName(t *testing.T) {
 		names[tl.Name] = true
 	}
 
-	for _, want := range []string{"causely__get_logs", "causely__get_root_cause_details", "grafana__query_range"} {
+	for _, want := range []string{"causely__get_logs", "causely__get_issue_details", "grafana__query_range"} {
 		if !names[want] {
 			t.Errorf("buildTools() missing %q, got %v", want, names)
 		}
@@ -198,11 +198,11 @@ func TestFindMCPSource_NonMCPToolNameDoesNotMatch(t *testing.T) {
 
 func TestDescribeMCPSources_ListsEachSourceWithItsToolCount(t *testing.T) {
 	sources := []mcpSource{
-		{Name: "causely", Description: "root cause data", Tools: []mcpToolDef{{Name: "a"}, {Name: "b"}}},
+		{Name: "causely", Description: "issue data", Tools: []mcpToolDef{{Name: "a"}, {Name: "b"}}},
 		{Name: "grafana", Description: "", Tools: []mcpToolDef{{Name: "c"}}},
 	}
 	got := describeMCPSources(sources)
-	if !strings.Contains(got, "causely__* (2 tools): root cause data") {
+	if !strings.Contains(got, "causely__* (2 tools): issue data") {
 		t.Errorf("describeMCPSources() = %q, missing the causely line", got)
 	}
 	if !strings.Contains(got, "grafana__* (1 tools): no description provided") {
@@ -218,7 +218,7 @@ func TestDescribeMCPSources_EmptyIsExplicit(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_MentionsConfiguredSources(t *testing.T) {
-	payload := TriggerPayload{RootCauseName: "CrashLoop", EntityName: "svc", Severity: "high"}
+	payload := TriggerPayload{DiagnosisName: "CrashLoop", EntityName: "svc", Severity: "high"}
 	sources := []mcpSource{{Name: "grafana", Description: "dashboards", Tools: []mcpToolDef{{Name: "q"}}}}
 	prompt := buildSystemPrompt(payload, "org/repo", sources, false)
 	if !strings.Contains(prompt, "grafana__* (1 tools): dashboards") {
@@ -259,7 +259,7 @@ func TestFixHasRealChange_FalseWhenNoChanges(t *testing.T) {
 // the prompt Claude sees.
 func TestBuildSystemPrompt_NeverLeaksCauselyRemediationHint(t *testing.T) {
 	payload := TriggerPayload{
-		RootCauseName: "Congested",
+		DiagnosisName: "Congested",
 		EntityName:    "causely/gateway",
 		Severity:      "Medium",
 		Description:   "some description",

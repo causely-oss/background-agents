@@ -37,15 +37,15 @@ type NotificationRemediation struct {
 // causelyNamespaceLabel / causelyGitHubRepoLabel are the entity label keys
 // used for scope hints. causely.ai/namespace already exists on every entity
 // today; causely.ai/github-repo is an opt-in label a customer would add to
-// their own workload manifests to route root causes to the right repo.
+// their own workload manifests to route issues to the right repo.
 const (
 	causelyNamespaceLabel  = "causely.ai/namespace"
 	causelyGitHubRepoLabel = "causely.ai/github-repo"
 )
 
 // toTriggerPayload adapts Causely's real notification payload to this agent's
-// internal TriggerPayload. RootCauseName prefers CustomName (the LLM-generated
-// title) when present, falling back to Name (the underlying CML root cause
+// internal TriggerPayload. DiagnosisName prefers CustomName (the LLM-generated
+// title) when present, falling back to Name (the underlying CML diagnosis
 // type), matching how Causely's own Slack/Teams rendering already does this.
 //
 // Note: SlackChannel/SlackThreadTS are deliberately left empty here — those
@@ -67,7 +67,7 @@ func (p NotificationPayload) toTriggerPayload() TriggerPayload {
 		IssueID:         p.ObjectId,
 		EntityID:        p.Entity.Id,
 		EntityName:      p.Entity.Name,
-		RootCauseName:   name,
+		DiagnosisName:   name,
 		Severity:        p.Severity,
 		Description:     p.Description.Summary,
 		Remediation:     remediation,

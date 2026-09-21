@@ -124,7 +124,7 @@ All three feed the same investigation path and the same
 
 - **`observe`** (default) — runs the full investigation and records what it
   found and what it would have done, but never opens a real PR or posts to
-  Slack. Use this to evaluate a configuration or Causely's own root-cause
+  Slack. Use this to evaluate a configuration or Causely's own diagnosis
   quality without side effects.
 - **`act`** — does it for real.
 

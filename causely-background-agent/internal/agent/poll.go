@@ -162,13 +162,13 @@ func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *poll
 // polledIssue is a defensively-parsed subset of one entry from get_issues — the
 // exact response schema isn't pinned down here, so every field is read with a
 // fallback across the plausible key names rather than a rigid struct, and a
-// missing root cause ID just skips the issue (logged) rather than panicking.
+// missing Issue ID just skips the issue (logged) rather than panicking.
 type polledIssue struct {
 	IssueID         string
 	EntityID        string
 	EntityName      string
 	EntityNamespace string
-	RootCauseName   string
+	DiagnosisName   string
 	Severity        string
 	Description     string
 	Remediation     string
@@ -209,7 +209,7 @@ func (p polledIssue) toTriggerPayload(cfg Config) TriggerPayload {
 		IssueID:         p.IssueID,
 		EntityID:        p.EntityID,
 		EntityName:      p.EntityName,
-		RootCauseName:   p.RootCauseName,
+		DiagnosisName:   p.DiagnosisName,
 		Severity:        p.Severity,
 		Description:     p.Description,
 		Remediation:     p.Remediation,
@@ -241,7 +241,7 @@ func parsePolledIssues(raw string) ([]polledIssue, error) {
 			EntityID:        firstString(entity, "id"),
 			EntityName:      firstString(entity, "name"),
 			EntityNamespace: firstString(m, "entity_namespace", "namespace"),
-			RootCauseName:   firstString(m, "name", "root_cause_name", "type"),
+			DiagnosisName:   firstString(m, "name", "type"),
 			Severity:        firstString(m, "severity"),
 			Description:     firstString(desc, "summary"),
 			Remediation:     firstString(desc, "remediation"),

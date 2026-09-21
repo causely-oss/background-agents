@@ -9,7 +9,7 @@ import (
 
 // checkIssueStillActive asks the Causely MCP server whether issueID is
 // still an open issue before spending anything investigating it. A trigger can
-// reach this agent well after the root cause was detected — a delayed Slack
+// reach this agent well after the Issue was detected — a delayed Slack
 // "Fix it" click, a manual/test POST /trigger, or simply an issue that resolved
 // itself between detection and now. The poll trigger source already filters on
 // only_active (see poll.go), but the webhook and Slack paths have no equivalent
@@ -38,7 +38,7 @@ func checkIssueStillActive(client *mcpClient, issueID string, log *zap.Logger) (
 	}
 
 	if endedAt := wrapped.Issues[0].EndedAt; endedAt != "" {
-		return true, fmt.Sprintf("root cause already resolved (ended_at=%s)", endedAt)
+		return true, fmt.Sprintf("Issue already resolved (ended_at=%s)", endedAt)
 	}
 	return false, ""
 }

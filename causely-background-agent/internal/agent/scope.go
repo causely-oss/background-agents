@@ -6,7 +6,7 @@ import (
 )
 
 // inScope reports whether this remediator instance may act on the triggering
-// root cause. Mediator-side routing is best-effort, not a guarantee, so a
+// Issue. Mediator-side routing is best-effort, not a guarantee, so a
 // remediator must not open a PR against a repo it wasn't configured for.
 //
 // Independent, non-exclusive signals checked, in order:
@@ -14,7 +14,7 @@ import (
 //  2. ScopeNamespaces — if configured, the entity's namespace must be in the list.
 //  3. AllowedSeverities — if configured, payload.Severity must be in the list.
 //     Applies uniformly to every trigger source (webhook, poll, Slack). Added
-//     after finding live that Causely's own root-cause severity can flicker
+//     after finding live that Causely's own Issue severity can flicker
 //     between a baseline and an elevated value as a chronic condition merely
 //     toggles active/inactive, which — combined with poll's watermark falling
 //     back to severity when there's no updated_at — produced duplicate paid
@@ -33,7 +33,7 @@ func inScope(cfg Config, payload TriggerPayload) (bool, string) {
 	if len(cfg.ScopeNamespaces) > 0 {
 		ns := strings.TrimSpace(payload.EntityNamespace)
 		if ns == "" {
-			return false, "SCOPE_NAMESPACES is configured but the root cause carried no entity namespace"
+			return false, "SCOPE_NAMESPACES is configured but the Issue carried no entity namespace"
 		}
 		match := false
 		for _, allowed := range cfg.ScopeNamespaces {

@@ -83,7 +83,7 @@ func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec
 			IssueID       string `json:"issue_id"`
 			EntityID      string `json:"entity_id"`
 			EntityName    string `json:"entity_name"`
-			RootCauseName string `json:"root_cause_name"`
+			DiagnosisName string `json:"diagnosis_name"`
 			Severity      string `json:"severity"`
 			Description   string `json:"description"`
 			Remediation   string `json:"remediation"`
@@ -97,7 +97,7 @@ func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec
 			IssueID:       val.IssueID,
 			EntityID:      val.EntityID,
 			EntityName:    val.EntityName,
-			RootCauseName: val.RootCauseName,
+			DiagnosisName: val.DiagnosisName,
 			Severity:      val.Severity,
 			Description:   val.Description,
 			Remediation:   val.Remediation,

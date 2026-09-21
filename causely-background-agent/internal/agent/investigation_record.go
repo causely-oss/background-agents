@@ -11,14 +11,14 @@ import (
 
 // InvestigationRecord captures everything about one investigation run,
 // regardless of trigger source or verdict, so causely-background-agent's behavior *and*
-// Causely's own root-cause analysis quality can be measured and compared over
+// Causely's own diagnosis quality can be measured and compared over
 // time — instead of only observed anecdotally per-incident in logs and Slack.
 type InvestigationRecord struct {
 	// Identity
 	IssueID       string `json:"issue_id"`
 	EntityID      string `json:"entity_id,omitempty"`
 	EntityName    string `json:"entity_name,omitempty"`
-	RootCauseName string `json:"root_cause_name,omitempty"`
+	DiagnosisName string `json:"diagnosis_name,omitempty"`
 	Severity      string `json:"severity,omitempty"`
 
 	// Provenance
@@ -57,7 +57,7 @@ type InvestigationRecord struct {
 	ProposedFix *ProposedFix `json:"proposed_fix,omitempty"`
 
 	// CauselyRemediationHint is Causely's own suggested remediation from the
-	// triggering root cause, captured here for later human comparison against
+	// triggering issue, captured here for later human comparison against
 	// what the agent itself independently concluded. It is deliberately never
 	// shown to Claude during the investigation (see buildSystemPrompt in
 	// agent.go) — this agent's entire value over the generic hint is its tool

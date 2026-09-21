@@ -16,7 +16,7 @@ func TestFixBranchPrefix(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "typical UUID root cause id",
+			name:    "typical UUID issue id",
 			issueID: "32a3cbcc-15f2-4587-a015-06ed4470a7c5",
 			want:    "causely-fix/32a3cbcc-15f2-4587-a015-06ed4470a7c5",
 		},
@@ -26,7 +26,7 @@ func TestFixBranchPrefix(t *testing.T) {
 			want:    "causely-fix/rc-with-spaces-and-stars",
 		},
 		{
-			name:    "empty root cause id falls back to a stable placeholder",
+			name:    "empty issue id falls back to a stable placeholder",
 			issueID: "",
 			want:    "causely-fix/unknown",
 		},

@@ -17,7 +17,7 @@ type Config struct {
 	GitHubRepo      string   `yaml:"github_repo" env-required:"true"` // the one "org/repo" this instance is allowed to read/write
 	ScopeNamespaces []string `yaml:"scope_namespaces"`                // optional allowlist of entity namespaces this instance handles
 	// AllowedSeverities, if set, restricts every trigger source (webhook, poll,
-	// Slack) to root causes whose severity is in this list (e.g. ["High",
+	// Slack) to Issues whose severity is in this list (e.g. ["High",
 	// "Critical"]) — see inScope in scope.go. Also passed straight through to
 	// poll's get_issues call (see poll.go) so low-severity issues aren't even
 	// fetched, not just rejected after the fact.
@@ -42,7 +42,7 @@ type Config struct {
 	// Poll is an alternative/additional trigger source to the push webhook: on
 	// an interval, ask Causely for open issues directly instead of waiting for
 	// a one-time webhook fire — see poll.go. A push notification only reflects
-	// the root cause's state at detection time; polling lets the agent observe
+	// the Issue's state at detection time; polling lets the agent observe
 	// how it evolves (more/fewer symptoms, cleared, recurred).
 	Poll PollConfig `yaml:"poll"`
 
@@ -96,7 +96,7 @@ type Config struct {
 type PollConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	Interval string `yaml:"interval" env-default:"5m"` // parsed with time.ParseDuration
-	// StateFile persists the watermark of already-seen root-cause occurrences
+	// StateFile persists the watermark of already-seen Issue occurrences
 	// across restarts, so a restart doesn't either replay everything or skip
 	// everything that arrived while the process was down.
 	StateFile string `yaml:"state_file"`

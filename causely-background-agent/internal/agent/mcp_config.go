@@ -50,7 +50,7 @@ func resolveMCPServers(causelyURL, causelyToken, causelyClientID, causelyClientS
 		Token:        causelyToken,
 		ClientID:     causelyClientID,
 		ClientSecret: causelyClientSecret,
-		Description:  "Causely's root-cause analysis, topology, and observability data (logs, metrics, SLOs, defects).",
+		Description:  "Causely's issue/diagnosis analysis, topology, and observability data (logs, metrics, SLOs, defects).",
 	}}
 	servers = append(servers, extra...)
 

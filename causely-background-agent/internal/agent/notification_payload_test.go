@@ -25,7 +25,7 @@ func TestNotificationPayload_ToTriggerPayload(t *testing.T) {
 	p := n.toTriggerPayload()
 
 	if p.IssueID != "rc-1" || p.EntityID != "e-1" || p.EntityName != "buggy-app" ||
-		p.RootCauseName != "ImagePullErrors" || p.Severity != "Critical" ||
+		p.DiagnosisName != "ImagePullErrors" || p.Severity != "Critical" ||
 		p.Description != "bad image tag" || p.Remediation != "correct the tag" ||
 		p.EntityNamespace != "chaosmania" || p.GitHubRepoLabel != "org/repo" {
 		t.Errorf("toTriggerPayload() = %+v", p)
@@ -34,8 +34,8 @@ func TestNotificationPayload_ToTriggerPayload(t *testing.T) {
 
 func TestNotificationPayload_CustomNamePreferredOverName(t *testing.T) {
 	n := NotificationPayload{Name: "ImagePullErrors", CustomName: "Nginx image tag typo"}
-	if got := n.toTriggerPayload().RootCauseName; got != "Nginx image tag typo" {
-		t.Errorf("RootCauseName = %q, want CustomName to win", got)
+	if got := n.toTriggerPayload().DiagnosisName; got != "Nginx image tag typo" {
+		t.Errorf("DiagnosisName = %q, want CustomName to win", got)
 	}
 }
 
