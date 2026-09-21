@@ -1,6 +1,6 @@
 # causely-background-agent
 
-A standalone reference agent that investigates a Kubernetes root cause using
+A standalone reference agent that investigates a Kubernetes Issue using
 [Causely](https://causely.ai)'s MCP tools plus GitHub read/write access, and
 either opens a PR with a code-level fix or recommends an immediate
 remediation (restart, rollback, scale, revert a config).
@@ -13,9 +13,9 @@ something different against the same MCP tools.
 ## What it does
 
 ```
-Causely root cause  →  causely-background-agent  →  Claude tool-use loop
+Causely Issue        →  causely-background-agent  →  Claude tool-use loop
   (webhook push,          /trigger         │
-   or polled directly)  /slack/actions     ├─ Causely MCP tools (root cause,
+   or polled directly)  /slack/actions     ├─ Causely MCP tools (Issue,
                                             │  logs, topology, evidence)
                                             ├─ any additional MCP servers you
                                             │  configure (Prometheus, Grafana,
@@ -96,7 +96,7 @@ scoping, and everything else below in more depth.
 
 - **Push webhook** (`POST /trigger`) — Causely's mediator POSTs its real,
   already-existing notification payload (see `notification_payload.go`) after
-  detecting a root cause; this is the same payload Slack/Teams destinations
+  detecting an Issue; this is the same payload Slack/Teams destinations
   already receive, not a bespoke schema. Wiring this up is a **mediator
   notification-config change, not a code change**: point a `causelybot`-type
   destination at this agent's `/trigger` URL with a Bearer token matching
@@ -104,7 +104,7 @@ scoping, and everything else below in more depth.
   `NOTIFICATION_CAUSELY_AGENT_TYPE=causelybot`,
   `NOTIFICATION_CAUSELY_AGENT_URL=http://<this-service>:8090/trigger`,
   `NOTIFICATION_CAUSELY_AGENT_TOKEN=<same as TRIGGER_SHARED_SECRET>`.
-  Reflects the root cause's state at the moment it fired. Note: this delivery
+  Reflects the Issue's state at the moment it fired. Note: this delivery
   path doesn't carry Slack channel/thread info (that only exists after
   mediator's separate Slack-specific delivery), so a reply in `act` mode can't
   be threaded to the original alert via this trigger source.
@@ -113,7 +113,7 @@ scoping, and everything else below in more depth.
   a one-time webhook. Tracks a watermark per issue so an unchanged, still-open
   issue isn't re-investigated every cycle, but a real change (severity shift,
   symptom count growth) or new occurrence triggers again. Useful because a
-  webhook can't reflect how a root cause evolves after it fires.
+  webhook can't reflect how an Issue evolves after it fires.
 - **Slack `/slack/actions`** — a human clicking "Fix it" on a Causely Slack
   alert.
 
@@ -167,7 +167,7 @@ on, so it **defaults to `["High", "Critical"]`** even if you never set it
 keeping `poll.interval` reasonable (default `5m`) are the other two main
 levers. For the webhook trigger, the equivalent lever is on Causely's
 mediator side: configure its notification destination to only push
-High/Critical-severity root causes to this agent in the first place, rather
+High/Critical-severity Issues to this agent in the first place, rather
 than relying on this agent to filter after the fact.
 
 ## Model
@@ -253,9 +253,9 @@ in `agent.go`.
 
 ## Not adopting Causely's own suggested remediation
 
-Causely's root-cause detection includes its own LLM-generated remediation
+Causely's Issue detection includes its own LLM-generated remediation
 suggestion (`description.remediationOptions`), sometimes also embedded as a
-concluding sentence inside the root cause's description text (e.g.
+concluding sentence inside the Issue's description text (e.g.
 "Remediation should focus on..."). This agent's system prompt (see
 `buildSystemPrompt` in `agent.go`) deliberately never shows Claude that
 suggestion, and explicitly instructs it not to adopt any such sentence found
@@ -301,7 +301,7 @@ cluster only, set `allow_unauthenticated_trigger: true` /
 accept that risk instead.
 
 `allowed_severities` (config.yaml, e.g. `["High", "Critical"]`) restricts
-every trigger source to root causes at those severities — see `scope.go`'s
+every trigger source to Issues at those severities — see `scope.go`'s
 `inScope` and `poll.go`.
 
 **If `poll.enabled: true` and this is left unset, poll defaults to
@@ -355,7 +355,7 @@ plain Kubernetes manifests under `deploy/` — no Helm/chart dependency.
 
 ## Known limitations
 
-- No RC-type allowlist — every root cause type triggers an investigation.
+- No Issue-type allowlist — every Issue type triggers an investigation.
 - Extra MCP server tokens (and client_id/client_secret pairs) configured via
   `mcp_servers` in config.yaml land in the ConfigMap, not a Secret — fine for
   an unauthenticated server, be aware for an authenticated

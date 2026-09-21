@@ -3,7 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/causely-background-agent .
+RUN CGO_ENABLED=0 go build -o /out/causely-background-agent ./cmd/causely-background-agent
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates && \

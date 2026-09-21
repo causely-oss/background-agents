@@ -59,6 +59,24 @@ spec:
           command: ["/bin/causely-background-agent"]
           args: ["-config", "/config/config.yaml"]
           env:
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://mediator.causely-mediation.svc.cluster.local:4317
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: grpc
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: service.name=causely-background-agent,deployment.environment.name=local-kind
+            - name: K8S_POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: K8S_POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+            - name: K8S_NAMESPACE_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: K8S_NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: K8S_DEPLOYMENT_NAME
+              value: causely-background-agent
+            - name: K8S_CONTAINER_NAME
+              value: causely-background-agent
             - name: ANTHROPIC_API_KEY
               valueFrom: { secretKeyRef: { name: causely-background-agent, key: anthropic-api-key } }
             - name: GITHUB_TOKEN
