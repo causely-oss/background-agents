@@ -1,6 +1,6 @@
 # causely-background-agent
 
-A standalone reference agent that investigates a Kubernetes Issue using
+A standalone reference agent that investigates issues using
 [Causely](https://causely.ai)'s MCP tools plus GitHub read/write access, and
 either opens a PR with a code-level fix or recommends an immediate
 remediation (restart, rollback, scale, revert a config).
@@ -39,8 +39,7 @@ Any customer with a Kubernetes cluster and Causely reachable from it can
 deploy this — nothing here is specific to any one tenant or environment.
 
 **Prerequisites:**
-- A Kubernetes cluster (this agent's own infrastructure — doesn't need to be
-  where Causely itself runs)
+- A Kubernetes cluster (this agent's infrastructure, can be separate from where the Causely mediator runs)
 - Causely reachable from that cluster, either Causely's hosted MCP endpoint
   (`https://api.causely.app/mcp`) or an in-cluster address
 - An [Anthropic API key](https://console.anthropic.com/)
