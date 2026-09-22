@@ -14,13 +14,19 @@
 #     scope_namespaces in config.yaml. Read broadly, act narrowly: a bad
 #     restart/scale call has a much bigger blast radius than a bad read.
 #
-# Deliberately does NOT grant "get" on secrets in a way that exposes values —
-# kubectl_get_secret_keys uses the same RBAC verb as kubectl_get on other
-# kinds (list/get the object), but the tool layer only ever returns a
-# Secret's key names, never its decoded values (see kubeClient.GetSecretKeys
-# in kube.go). RBAC has no way to restrict a Role to a Secret's metadata/keys
-# without its data, so this safety boundary is enforced in this agent's own
-# code, not by RBAC — be aware of that if you fork/modify kube.go.
+# Secrets are deliberately NOT in the cluster-wide read ClusterRole below, and
+# deliberately NOT in this file at all — see rbac-secrets.example.yaml. RBAC
+# has no way to grant "get" on a Secret's metadata/keys without also granting
+# its decoded data — kubectl_get_secret_keys only ever returns key names (see
+# kubeClient.GetSecretKeys in kube.go), but that's a code-level filter, not an
+# RBAC boundary, and code-level filtering doesn't reduce what the
+# ServiceAccount token itself is authorized to read. A prior version of this
+# file put the opt-in Secret Role/RoleBinding at the bottom of THIS file —
+# review caught that `kubectl apply -f deploy/rbac.yaml` (as documented in
+# README.md) applies every document in a multi-doc YAML regardless of intent,
+# so "opt-in" sitting in the same file as the default-applied manifest was
+# opt-in in name only. It now requires a separate, deliberate
+# `kubectl apply -f deploy/rbac-secrets.example.yaml`.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -40,7 +46,7 @@ rules:
     resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
     verbs: ["get", "list"]
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "secrets"]
+    resources: ["pods", "services", "configmaps"]
     verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["pods/log"]

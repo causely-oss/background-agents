@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,22 +20,136 @@ import (
 )
 
 // kubeClient wraps a Kubernetes clientset. It exists (non-nil) only when this
-// pod is actually running in a cluster — see newKubeClient. Deliberately does
-// NOT expose Secret values: kubectl_get_secret_keys returns key names only,
-// since Secret content flowing into Claude's context risks it being echoed
-// back into a PR body, Slack message, or the investigation record.
+// pod is actually running in a cluster AND has at least one real RBAC grant —
+// see newKubeClient. Deliberately does NOT expose Secret values:
+// kubectl_get_secret_keys returns key names only, since Secret content
+// flowing into Claude's context risks it being echoed back into a PR body,
+// Slack message, or the investigation record.
 type kubeClient struct {
 	clientset kubernetes.Interface
+	perms     kubePermissions
+}
+
+// kindResource pairs a kubectl-style kind name with the (apiGroup, resource)
+// SelfSubjectAccessReview needs to check RBAC for it.
+type kindResource struct{ group, resource string }
+
+// readableKindResources/restartableKindResources/scalableKindResources are
+// the kinds kubectl_get/kubectl_rollout_restart/kubectl_scale each support —
+// checked individually, not as one coarse "workloads" bucket, so buildTools
+// can advertise exactly the kinds this deployment's RBAC actually grants,
+// not all of them just because ONE of them is granted.
+var readableKindResources = map[string]kindResource{
+	"deployment":  {"apps", "deployments"},
+	"statefulset": {"apps", "statefulsets"},
+	"daemonset":   {"apps", "daemonsets"},
+	"replicaset":  {"apps", "replicasets"},
+	"pod":         {"", "pods"},
+	"service":     {"", "services"},
+	"configmap":   {"", "configmaps"},
+}
+
+var restartableKindResources = map[string]kindResource{
+	"deployment":  {"apps", "deployments"},
+	"statefulset": {"apps", "statefulsets"},
+	"daemonset":   {"apps", "daemonsets"},
+}
+
+var scalableKindResources = map[string]kindResource{
+	"deployment":  {"apps", "deployments"},
+	"statefulset": {"apps", "statefulsets"},
+	"replicaset":  {"apps", "replicasets"},
+}
+
+// kubePermissions records what this ServiceAccount is actually authorized to
+// do, checked once at startup via SelfSubjectAccessReview — not merely
+// whether in-cluster credentials exist (every pod has *a* ServiceAccount
+// token; that says nothing about what deploy/rbac.yaml actually granted it),
+// and not as coarse per-verb buckets either — buildTools uses the per-kind
+// maps to advertise exactly the kinds each tool will actually work for,
+// instead of offering e.g. kubectl_get claiming support for all 7 kinds when
+// only some of them are actually readable.
+type kubePermissions struct {
+	readableKinds    map[string]bool // kind -> get granted
+	restartableKinds map[string]bool // kind -> patch granted (rollout restart)
+	scalableKinds    map[string]bool // kind -> update granted (scale)
+	canReadPodLogs   bool
+	canReadSecrets   bool // opt-in, see deploy/rbac-secrets.example.yaml
+}
+
+func (p kubePermissions) canRead() bool {
+	return len(p.readableKindsList()) > 0 || p.canReadPodLogs || p.canReadSecrets
+}
+
+func (p kubePermissions) readableKindsList() []string    { return sortedTrueKeys(p.readableKinds) }
+func (p kubePermissions) restartableKindsList() []string { return sortedTrueKeys(p.restartableKinds) }
+func (p kubePermissions) scalableKindsList() []string    { return sortedTrueKeys(p.scalableKinds) }
+
+func sortedTrueKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k, v := range m {
+		if v {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// checkAccess asks the API server whether this ServiceAccount can perform
+// verb on resource in namespace (empty namespace means cluster-scoped), via
+// SelfSubjectAccessReview — the only reliable way to know what RBAC actually
+// granted, short of trying the call and seeing if it 403s. A review failure
+// (e.g. the SelfSubjectAccessReview API itself is blocked) is treated as "not
+// allowed" — fail closed.
+func checkAccess(clientset kubernetes.Interface, group, resource, verb, namespace string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	review := &authorizationv1.SelfSubjectAccessReview{
+		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authorizationv1.ResourceAttributes{
+				Group:     group,
+				Resource:  resource,
+				Verb:      verb,
+				Namespace: namespace,
+			},
+		},
+	}
+	result, err := clientset.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
+	if err != nil {
+		return false
+	}
+	return result.Status.Allowed
+}
+
+// checkAccessAnyNamespace reports whether verb on resource is granted either
+// cluster-wide, or in at least one of namespaces. deploy/rbac.yaml grants
+// mutate/secrets access via namespaced RoleBindings on purpose (see its own
+// comments) — checking only the cluster-scoped case (an empty namespace)
+// would report false for exactly the access pattern the RBAC manifest is
+// designed around, never offering those tools even when correctly granted.
+func checkAccessAnyNamespace(clientset kubernetes.Interface, group, resource, verb string, namespaces []string) bool {
+	if checkAccess(clientset, group, resource, verb, "") {
+		return true
+	}
+	for _, ns := range namespaces {
+		if checkAccess(clientset, group, resource, verb, ns) {
+			return true
+		}
+	}
+	return false
 }
 
 // newKubeClient attempts in-cluster auto-detection (the standard
-// ServiceAccount token + CA cert every pod gets mounted automatically). It
-// returns (nil, err) rather than a fatal error when unavailable — e.g. running
-// locally outside a cluster, or a deployment that hasn't granted the RBAC in
-// deploy/rbac.yaml — so the kubectl tools are simply omitted rather than
-// blocking startup, matching how an unreachable MCP server degrades in
-// loadMCPSources.
-func newKubeClient() (*kubeClient, error) {
+// ServiceAccount token + CA cert every pod gets mounted automatically), then
+// checks what deploy/rbac.yaml actually granted it — scopeNamespaces should
+// be cfg.ScopeNamespaces, since that's what the mutate/secrets RoleBindings
+// are bound against. It returns (nil, err) rather than a fatal error when
+// unavailable — running locally outside a cluster, or a deployment that
+// hasn't applied deploy/rbac.yaml at all — so the kubectl tools are simply
+// omitted rather than blocking startup, matching how an unreachable MCP
+// server degrades in loadMCPSources.
+func newKubeClient(scopeNamespaces []string) (*kubeClient, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("not running in-cluster: %w", err)
@@ -43,7 +158,40 @@ func newKubeClient() (*kubeClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("build clientset: %w", err)
 	}
-	return &kubeClient{clientset: clientset}, nil
+
+	perms := kubePermissions{
+		readableKinds:    make(map[string]bool, len(readableKindResources)),
+		restartableKinds: make(map[string]bool, len(restartableKindResources)),
+		scalableKinds:    make(map[string]bool, len(scalableKindResources)),
+		canReadPodLogs:   checkAccess(clientset, "", "pods/log", "get", ""),
+		// Deliberately checked cluster-wide OR per scopeNamespaces:
+		// deploy/rbac-secrets.example.yaml grants it via a namespaced
+		// RoleBinding by design, so checking only the cluster-scoped case
+		// would always report false for exactly the access pattern it grants.
+		canReadSecrets: checkAccessAnyNamespace(clientset, "", "secrets", "get", scopeNamespaces),
+	}
+	// Read is checked cluster-wide only, matching deploy/rbac.yaml's read
+	// ClusterRole, which is deliberately bound via ClusterRoleBinding, not
+	// per-namespace (see its own comment on why diagnosis shouldn't be
+	// namespace-blind). Checked per KIND, not as one coarse bucket, so a
+	// partial grant (e.g. pods but not deployments) is reflected accurately.
+	for kind, gr := range readableKindResources {
+		perms.readableKinds[kind] = checkAccess(clientset, gr.group, gr.resource, "get", "")
+	}
+	// Mutate is checked cluster-wide OR per scopeNamespaces, matching how
+	// deploy/rbac.yaml's mutate ClusterRole is bound via a namespaced
+	// RoleBinding by design.
+	for kind, gr := range restartableKindResources {
+		perms.restartableKinds[kind] = checkAccessAnyNamespace(clientset, gr.group, gr.resource, "patch", scopeNamespaces)
+	}
+	for kind, gr := range scalableKindResources {
+		perms.scalableKinds[kind] = checkAccessAnyNamespace(clientset, gr.group, gr.resource, "update", scopeNamespaces)
+	}
+	if !perms.canRead() {
+		return nil, fmt.Errorf("in-cluster credentials present but deploy/rbac.yaml's read ClusterRole isn't granted to this ServiceAccount")
+	}
+
+	return &kubeClient{clientset: clientset, perms: perms}, nil
 }
 
 // readableKinds is the allowlist for kubectl_get — deliberately excludes
@@ -219,11 +367,17 @@ func describeKubeError(err error, kind, namespace, name string) error {
 	return fmt.Errorf("%s %s/%s: %w", kind, namespace, name, err)
 }
 
-// logKubeClientInit logs whether kubectl tools are available this run.
+// logKubeClientInit logs whether kubectl tools are available this run, and
+// which specific capabilities RBAC actually granted.
 func logKubeClientInit(log *zap.Logger, kc *kubeClient, err error) {
 	if kc == nil {
 		log.Info("kubectl tools unavailable, skipping", zap.Error(err))
 		return
 	}
-	log.Info("kubectl tools enabled (in-cluster ServiceAccount detected)")
+	log.Info("kubectl tools enabled",
+		zap.Strings("readable_kinds", kc.perms.readableKindsList()),
+		zap.Strings("restartable_kinds", kc.perms.restartableKindsList()),
+		zap.Strings("scalable_kinds", kc.perms.scalableKindsList()),
+		zap.Bool("read_pod_logs", kc.perms.canReadPodLogs),
+		zap.Bool("read_secrets", kc.perms.canReadSecrets))
 }

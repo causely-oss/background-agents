@@ -35,14 +35,20 @@ func loadPollWatermark(path string) *pollWatermark {
 	return w
 }
 
-// changed reports whether version is new for id, and records it either way
-// so the next poll cycle sees it as already-seen.
-func (w *pollWatermark) changed(id, version string) bool {
-	if prev, ok := w.seen[id]; ok && prev == version {
-		return false
-	}
+// hasChanged reports whether version is new for id — a pure check, no side
+// effect. Callers MUST call commit(id, version) once they've actually
+// dispatched on this change, not before: committing on a change that turned
+// out to be rejected (e.g. an in-flight investigation for the same issue,
+// see trigger_dedup.go) would mark it seen without ever having acted on it,
+// permanently losing that occurrence from the next poll cycle's perspective.
+func (w *pollWatermark) hasChanged(id, version string) bool {
+	prev, ok := w.seen[id]
+	return !ok || prev != version
+}
+
+// commit records version as the last-seen watermark for id.
+func (w *pollWatermark) commit(id, version string) {
 	w.seen[id] = version
-	return true
 }
 
 func (w *pollWatermark) persist() error {
@@ -85,7 +91,7 @@ func pollSeverities(cfg Config) []string {
 // mediator to fire a one-time webhook. This exists because a webhook only reflects
 // an issue's state at the moment it fired — issues evolve (more/fewer symptoms,
 // severity shifts, auto-clear), and a poll loop is how the agent can notice that.
-func runPollLoop(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *recorder, kc *kubeClient) {
+func runPollLoop(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *recorder, kc *kubeClient, dedup *triggerDedup) {
 	interval, err := time.ParseDuration(cfg.Poll.Interval)
 	if err != nil {
 		logger.Fatal("invalid poll.interval", zap.Error(err))
@@ -99,11 +105,11 @@ func runPollLoop(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *reco
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for range ticker.C {
-		pollOnce(logger, cfg, client, watermark, weekly, rec, kc)
+		pollOnce(logger, cfg, client, watermark, weekly, rec, kc, dedup)
 	}
 }
 
-func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *pollWatermark, weekly *weeklyBudget, rec *recorder, kc *kubeClient) {
+func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *pollWatermark, weekly *weeklyBudget, rec *recorder, kc *kubeClient, dedup *triggerDedup) {
 	// active_only is get_issues's real parameter name (its default is already true,
 	// so this was previously a no-op typo — "only_active" — that happened to work by
 	// coincidence). namespace_names filters server-side: get_issues's lightweight
@@ -143,12 +149,29 @@ func pollOnce(logger *zap.Logger, cfg Config, client *mcpClient, watermark *poll
 		if issue.IssueID == "" {
 			continue
 		}
-		if !watermark.changed(issue.IssueID, issue.version()) {
+		version := issue.version()
+		if !watermark.hasChanged(issue.IssueID, version) {
 			continue
 		}
-		changedCount++
 		payload := issue.toTriggerPayload(cfg)
-		go runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourcePoll)
+		// Also guards the race between this poll cycle and a webhook/Slack
+		// trigger for the same issue landing at the same time — see
+		// trigger_dedup.go. Use the SAME identity (issue.version()) the
+		// watermark itself uses, not a separately-derived payload hash — the
+		// two must agree on what "changed" means, or dedup can reject an
+		// occurrence the watermark considers genuinely new (or vice versa).
+		if !dedup.tryAcquire(triggerSourcePoll, payload.IssueID, version) {
+			continue
+		}
+		// Only commit the watermark once dispatch is actually happening — see
+		// hasChanged's doc comment for why committing on a rejected attempt
+		// would permanently lose this occurrence.
+		watermark.commit(issue.IssueID, version)
+		changedCount++
+		go func() {
+			defer dedup.release(payload.IssueID)
+			runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourcePoll)
+		}()
 	}
 
 	if changedCount > 0 {

@@ -7,9 +7,12 @@ import (
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	ktesting "k8s.io/client-go/testing"
 )
 
 func fakeKubeClient(t *testing.T, objs ...any) *kubeClient {
@@ -34,6 +37,49 @@ func fakeKubeClient(t *testing.T, objs ...any) *kubeClient {
 		}
 	}
 	return &kubeClient{clientset: cs}
+}
+
+// TestCheckAccessAnyNamespace_FallsBackToScopeNamespaces guards the fix for
+// namespace-scoped RBAC never being detected: deploy/rbac.yaml grants
+// mutate/secrets via namespaced RoleBindings on purpose, so checking only
+// cluster-scoped access (empty namespace) must not be the only path checked.
+func TestCheckAccessAnyNamespace_FallsBackToScopeNamespaces(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "selfsubjectaccessreviews", func(action ktesting.Action) (bool, runtime.Object, error) {
+		review := action.(ktesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+		// Only actually allowed when scoped to the "causely" namespace —
+		// cluster-wide (empty namespace) and any other namespace are denied,
+		// matching a namespaced RoleBinding that grants access in one
+		// specific namespace only.
+		review.Status.Allowed = review.Spec.ResourceAttributes.Namespace == "causely"
+		return true, review, nil
+	})
+
+	if checkAccessAnyNamespace(cs, "apps", "deployments", "patch", nil) {
+		t.Error("checkAccessAnyNamespace() with no scope namespaces should be false when only a namespaced grant exists")
+	}
+	if checkAccessAnyNamespace(cs, "apps", "deployments", "patch", []string{"other-namespace"}) {
+		t.Error("checkAccessAnyNamespace() should be false when the grant is scoped to a namespace not in scopeNamespaces")
+	}
+	if !checkAccessAnyNamespace(cs, "apps", "deployments", "patch", []string{"other-namespace", "causely"}) {
+		t.Error("checkAccessAnyNamespace() should be true when one of scopeNamespaces matches the namespaced grant")
+	}
+}
+
+// TestCheckAccessAnyNamespace_ClusterWideGrantNeedsNoScopeNamespace guards
+// the read-permission case: a ClusterRoleBinding grant (empty namespace) must
+// still be detected even with no scope namespaces configured.
+func TestCheckAccessAnyNamespace_ClusterWideGrantNeedsNoScopeNamespace(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("create", "selfsubjectaccessreviews", func(action ktesting.Action) (bool, runtime.Object, error) {
+		review := action.(ktesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+		review.Status.Allowed = review.Spec.ResourceAttributes.Namespace == ""
+		return true, review, nil
+	})
+
+	if !checkAccessAnyNamespace(cs, "", "pods", "get", nil) {
+		t.Error("checkAccessAnyNamespace() should be true for a cluster-wide grant even with no scope namespaces")
+	}
 }
 
 func TestKubeClient_GetResource_Deployment(t *testing.T) {

@@ -34,6 +34,14 @@ type Config struct {
 	// flip to "act" deliberately once a config is trusted.
 	ActionMode string `yaml:"action_mode" env-default:"observe"`
 
+	// AllowKubernetesMutations is a second, separate gate in front of
+	// kubectl_rollout_restart/kubectl_scale, on top of action_mode=act.
+	// action_mode=act alone (opening PRs, posting to Slack) is a much smaller
+	// blast radius than directly mutating a live workload — defaulting the
+	// latter to off means enabling act mode doesn't silently also hand an LLM
+	// production restart/scale authority; that's a separate, deliberate choice.
+	AllowKubernetesMutations bool `yaml:"allow_kubernetes_mutations"`
+
 	// InvestigationRecordPath, if set, appends one JSON-lines InvestigationRecord
 	// per run (see investigation_record.go) — the dataset behind every "how well
 	// is this working" question, independent of the ephemeral Slack/log output.
@@ -90,6 +98,12 @@ type Config struct {
 	// investigations' worth rather than being airtight. <= 0 disables the
 	// limit — not recommended.
 	MaxConcurrentInvestigations int `yaml:"max_concurrent_investigations" env-default:"5"`
+
+	// TriggerDedupStateFile, if set, persists the webhook/poll dedup watermark
+	// (see trigger_dedup.go) across restarts, so a retry that happens to land
+	// right after a restart is still recognized. Without it, dedup still works
+	// for the lifetime of one process — it just resets on restart.
+	TriggerDedupStateFile string `yaml:"trigger_dedup_state_file"`
 }
 
 // PollConfig configures the poll-based trigger source (see poll.go).

@@ -59,12 +59,19 @@ spec:
           command: ["/bin/causely-background-agent"]
           args: ["-config", "/config/config.yaml"]
           env:
-            - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: http://mediator.causely-mediation.svc.cluster.local:4317
-            - name: OTEL_EXPORTER_OTLP_PROTOCOL
-              value: grpc
-            - name: OTEL_RESOURCE_ATTRIBUTES
-              value: service.name=causely-background-agent,deployment.environment.name=local-kind
+            # Telemetry is opt-in, not included below: initTelemetry in
+            # telemetry.go no-ops when OTEL_EXPORTER_OTLP_ENDPOINT is unset —
+            # it doesn't fail closed. A prior version of this manifest baked
+            # in Causely's own internal dev-cluster OTLP endpoint and
+            # environment name as if they were generic defaults; a comment
+            # saying "change this" doesn't stop `kubectl apply`/copy-paste
+            # from deploying them unchanged. To enable telemetry, add your own:
+            #   - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            #     value: http://<your-otlp-collector>:4317
+            #   - name: OTEL_EXPORTER_OTLP_PROTOCOL
+            #     value: grpc
+            #   - name: OTEL_RESOURCE_ATTRIBUTES
+            #     value: service.name=causely-background-agent,deployment.environment.name=<your-environment>
             - name: K8S_POD_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - name: K8S_POD_UID

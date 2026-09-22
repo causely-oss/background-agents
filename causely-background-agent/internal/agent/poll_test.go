@@ -33,7 +33,7 @@ func TestPollOnce_SendsActiveOnlyAndNamespaceFilter(t *testing.T) {
 	cfg := Config{ScopeNamespaces: []string{"causely"}}
 	client := newMCPClient(server.URL, "")
 	watermark := loadPollWatermark("")
-	pollOnce(zap.NewNop(), cfg, client, watermark, newWeeklyBudget(0, ""), nil, nil)
+	pollOnce(zap.NewNop(), cfg, client, watermark, newWeeklyBudget(0, ""), nil, nil, loadTriggerDedup(""))
 
 	if gotParams["active_only"] != true {
 		t.Errorf("active_only = %v, want true", gotParams["active_only"])
@@ -60,7 +60,7 @@ func TestPollOnce_OmitsNamespaceFilterButDefaultsSeverityWhenUnset(t *testing.T)
 
 	client := newMCPClient(server.URL, "")
 	watermark := loadPollWatermark("")
-	pollOnce(zap.NewNop(), Config{}, client, watermark, newWeeklyBudget(0, ""), nil, nil)
+	pollOnce(zap.NewNop(), Config{}, client, watermark, newWeeklyBudget(0, ""), nil, nil, loadTriggerDedup(""))
 
 	if _, ok := gotParams["namespace_names"]; ok {
 		t.Errorf("namespace_names = %v, want it omitted when ScopeNamespaces is unset", gotParams["namespace_names"])
@@ -118,7 +118,7 @@ func TestPollOnce_SendsSeverityFilter(t *testing.T) {
 	cfg := Config{AllowedSeverities: []string{"High", "Critical"}}
 	client := newMCPClient(server.URL, "")
 	watermark := loadPollWatermark("")
-	pollOnce(zap.NewNop(), cfg, client, watermark, newWeeklyBudget(0, ""), nil, nil)
+	pollOnce(zap.NewNop(), cfg, client, watermark, newWeeklyBudget(0, ""), nil, nil, loadTriggerDedup(""))
 
 	sev, ok := gotParams["severities"].([]any)
 	if !ok || len(sev) != 2 || sev[0] != "High" || sev[1] != "Critical" {
@@ -169,31 +169,83 @@ func TestParsePolledIssues_MissingUpdatedAtFallsBackToSeverityAndSymptomCount(t 
 	}
 }
 
+// TestPollOnce_InFlightOccurrenceIsNotLost guards the fix for poll.go
+// committing the watermark before checking dedup: if an investigation for
+// this issue is already in flight (e.g. a webhook trigger landed for the
+// same issue moments earlier), this poll cycle must NOT advance the
+// watermark for it — otherwise the next poll cycle would see the watermark
+// as already up to date and silently never retry this occurrence.
+func TestPollOnce_InFlightOccurrenceIsNotLost(t *testing.T) {
+	issueJSON := `{"issues":[{"id":"issue-1","name":"Congested","severity":"High","updated_at":"2026-01-01T00:00:00Z"}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":` + jsonQuote(issueJSON) + `}]}}`))
+	}))
+	defer server.Close()
+
+	cfg := Config{}
+	client := newMCPClient(server.URL, "")
+	watermark := loadPollWatermark("")
+	dedup := loadTriggerDedup("")
+
+	// Simulate a concurrent trigger for the same issue already in flight.
+	dedup.tryAcquire(triggerSourcePoll, "issue-1", "2026-01-01T00:00:00Z")
+
+	pollOnce(zap.NewNop(), cfg, client, watermark, newWeeklyBudget(0, ""), nil, nil, dedup)
+
+	if !watermark.hasChanged("issue-1", "2026-01-01T00:00:00Z") {
+		t.Error("watermark should NOT have been committed for an in-flight occurrence — it would be silently lost on the next poll cycle otherwise")
+	}
+}
+
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func TestPollWatermark_FirstSightingAndUnchangedValueDontRetrigger(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "watermark.json")
 	w := loadPollWatermark(path)
 
-	if !w.changed("rc-1", "v1") {
+	if !w.hasChanged("rc-1", "v1") {
 		t.Error("first sighting of rc-1 should report changed")
 	}
-	if w.changed("rc-1", "v1") {
+	w.commit("rc-1", "v1")
+	if w.hasChanged("rc-1", "v1") {
 		t.Error("same version again should not report changed")
 	}
-	if !w.changed("rc-1", "v2") {
+	if !w.hasChanged("rc-1", "v2") {
 		t.Error("a new version for the same id should report changed")
+	}
+}
+
+// TestPollWatermark_HasChangedDoesNotMutate guards the fix for poll.go
+// committing the watermark before checking whether dedup would even allow
+// dispatch: hasChanged must be a pure check, so a caller can decide NOT to
+// commit (e.g. because the occurrence turned out to be in-flight) without
+// having already lost track of the fact it was never actually acted on.
+func TestPollWatermark_HasChangedDoesNotMutate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "watermark.json")
+	w := loadPollWatermark(path)
+
+	if !w.hasChanged("rc-1", "v1") {
+		t.Fatal("first hasChanged() should report changed")
+	}
+	// Deliberately not calling commit — simulates a rejected dispatch attempt.
+	if !w.hasChanged("rc-1", "v1") {
+		t.Error("hasChanged() without a commit in between should still report changed — it must not have side effects")
 	}
 }
 
 func TestPollWatermark_PersistsAndReloads(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "watermark.json")
 	w := loadPollWatermark(path)
-	w.changed("rc-1", "v1")
+	w.commit("rc-1", "v1")
 	if err := w.persist(); err != nil {
 		t.Fatalf("persist() error = %v", err)
 	}
 
 	reloaded := loadPollWatermark(path)
-	if reloaded.changed("rc-1", "v1") {
+	if reloaded.hasChanged("rc-1", "v1") {
 		t.Error("reloaded watermark should still know about rc-1@v1 and report unchanged")
 	}
 }

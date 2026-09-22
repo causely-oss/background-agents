@@ -92,7 +92,7 @@ func TestBuildTools_PrefixesEachMCPSourceByItsName(t *testing.T) {
 		},
 	}
 
-	tools := buildTools(sources, "org/repo", false, false)
+	tools := buildTools(sources, "org/repo", nil, false)
 
 	names := make(map[string]bool, len(tools))
 	for _, tl := range tools {
@@ -112,14 +112,14 @@ func TestBuildTools_PrefixesEachMCPSourceByItsName(t *testing.T) {
 }
 
 func TestBuildTools_NoMCPSourcesStillHasBuiltins(t *testing.T) {
-	tools := buildTools(nil, "org/repo", false, false)
+	tools := buildTools(nil, "org/repo", nil, false)
 	if len(tools) != 6 {
 		t.Fatalf("buildTools(nil) = %d tools, want exactly the 6 built-ins", len(tools))
 	}
 }
 
 func TestBuildTools_IncludesNoActionNeeded(t *testing.T) {
-	tools := buildTools(nil, "org/repo", false, false)
+	tools := buildTools(nil, "org/repo", nil, false)
 	found := false
 	for _, tl := range tools {
 		if tl.Name == "no_action_needed" {
@@ -132,7 +132,7 @@ func TestBuildTools_IncludesNoActionNeeded(t *testing.T) {
 }
 
 func TestBuildTools_KubectlToolsOmittedWhenUnavailable(t *testing.T) {
-	tools := buildTools(nil, "org/repo", false, true)
+	tools := buildTools(nil, "org/repo", nil, true)
 	for _, tl := range tools {
 		if strings.HasPrefix(tl.Name, "kubectl_") {
 			t.Errorf("buildTools(kubectlAvailable=false) included %q", tl.Name)
@@ -140,8 +140,21 @@ func TestBuildTools_KubectlToolsOmittedWhenUnavailable(t *testing.T) {
 	}
 }
 
+// allKubePermissions returns a kubePermissions with every kind/capability
+// granted — a convenience for tests that don't care about per-kind
+// granularity (see TestBuildTools_PerKindRBACGating for that).
+func allKubePermissions() *kubePermissions {
+	return &kubePermissions{
+		readableKinds:    map[string]bool{"deployment": true, "statefulset": true, "daemonset": true, "replicaset": true, "pod": true, "service": true, "configmap": true},
+		restartableKinds: map[string]bool{"deployment": true, "statefulset": true, "daemonset": true},
+		scalableKinds:    map[string]bool{"deployment": true, "statefulset": true, "replicaset": true},
+		canReadPodLogs:   true,
+		canReadSecrets:   true,
+	}
+}
+
 func TestBuildTools_ReadOnlyKubectlToolsOfferedInObserveMode(t *testing.T) {
-	tools := buildTools(nil, "org/repo", true, false)
+	tools := buildTools(nil, "org/repo", allKubePermissions(), false)
 	names := make(map[string]bool, len(tools))
 	for _, tl := range tools {
 		names[tl.Name] = true
@@ -158,8 +171,109 @@ func TestBuildTools_ReadOnlyKubectlToolsOfferedInObserveMode(t *testing.T) {
 	}
 }
 
+func TestBuildTools_PerCapabilityRBACGating(t *testing.T) {
+	// Only secrets access is missing — every other read capability is granted.
+	// kubectl_get_secret_keys specifically should be omitted; kubectl_get and
+	// kubectl_logs should still be offered.
+	perms := allKubePermissions()
+	perms.canReadSecrets = false
+	tools := buildTools(nil, "org/repo", perms, false)
+	names := make(map[string]bool, len(tools))
+	for _, tl := range tools {
+		names[tl.Name] = true
+	}
+	if names["kubectl_get_secret_keys"] {
+		t.Error("buildTools() offered kubectl_get_secret_keys despite canReadSecrets=false")
+	}
+	for _, want := range []string{"kubectl_get", "kubectl_logs"} {
+		if !names[want] {
+			t.Errorf("buildTools() missing %q even though its own permission is granted", want)
+		}
+	}
+}
+
+func TestBuildTools_MutationsRequireBothActModeAndOwnPermission(t *testing.T) {
+	// allowKubernetesMutations=true but RBAC only grants patch, not update —
+	// kubectl_rollout_restart should be offered, kubectl_scale should not.
+	perms := &kubePermissions{
+		readableKinds:    map[string]bool{"deployment": true},
+		restartableKinds: map[string]bool{"deployment": true},
+		scalableKinds:    map[string]bool{},
+	}
+	tools := buildTools(nil, "org/repo", perms, true)
+	names := make(map[string]bool, len(tools))
+	for _, tl := range tools {
+		names[tl.Name] = true
+	}
+	if !names["kubectl_rollout_restart"] {
+		t.Error("buildTools() missing kubectl_rollout_restart despite canPatchWorkloads=true and allowKubernetesMutations=true")
+	}
+	if names["kubectl_scale"] {
+		t.Error("buildTools() offered kubectl_scale despite canUpdateWorkloads=false")
+	}
+}
+
+// TestBuildTools_PerKindRBACGating guards #6: the tool's own advertised
+// schema must be restricted to exactly the kinds RBAC actually grants, not
+// all kinds it mechanically knows how to handle just because ONE kind (or
+// one coarse "workloads" bucket) is granted. Only "pod" is readable here;
+// only "deployment" is patchable; only "replicaset" is updatable.
+func TestBuildTools_PerKindRBACGating(t *testing.T) {
+	perms := &kubePermissions{
+		readableKinds:    map[string]bool{"pod": true, "deployment": false, "service": false},
+		restartableKinds: map[string]bool{"deployment": true, "statefulset": false, "daemonset": false},
+		scalableKinds:    map[string]bool{"replicaset": true, "deployment": false, "statefulset": false},
+	}
+	tools := buildTools(nil, "org/repo", perms, true)
+
+	var get, restart, scale *anthropicTool
+	for i := range tools {
+		switch tools[i].Name {
+		case "kubectl_get":
+			get = &tools[i]
+		case "kubectl_rollout_restart":
+			restart = &tools[i]
+		case "kubectl_scale":
+			scale = &tools[i]
+		}
+	}
+	if get == nil || restart == nil || scale == nil {
+		t.Fatalf("expected all three tools to be offered (each has at least one granted kind), got tools=%v", tools)
+	}
+
+	checkEnum := func(t *testing.T, tool *anthropicTool, wantKind, mustNotContainKind string) {
+		t.Helper()
+		var schema struct {
+			Properties struct {
+				Kind struct {
+					Enum []string `json:"enum"`
+				} `json:"kind"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+			t.Fatalf("unmarshal %s schema: %v", tool.Name, err)
+		}
+		enum := schema.Properties.Kind.Enum
+		found := false
+		for _, k := range enum {
+			if k == wantKind {
+				found = true
+			}
+			if k == mustNotContainKind {
+				t.Errorf("%s's kind enum = %v, must not contain ungranted kind %q", tool.Name, enum, mustNotContainKind)
+			}
+		}
+		if !found {
+			t.Errorf("%s's kind enum = %v, want it to contain granted kind %q", tool.Name, enum, wantKind)
+		}
+	}
+	checkEnum(t, get, "pod", "deployment")
+	checkEnum(t, restart, "deployment", "statefulset")
+	checkEnum(t, scale, "replicaset", "deployment")
+}
+
 func TestBuildTools_MutatingKubectlToolsOnlyInActMode(t *testing.T) {
-	tools := buildTools(nil, "org/repo", true, true)
+	tools := buildTools(nil, "org/repo", allKubePermissions(), true)
 	names := make(map[string]bool, len(tools))
 	for _, tl := range tools {
 		names[tl.Name] = true

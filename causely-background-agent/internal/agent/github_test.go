@@ -220,6 +220,241 @@ func TestCreatePR_ExistingOpenPR_UpdatesInsteadOfDuplicating(t *testing.T) {
 	}
 }
 
+// TestCreatePR_ExistingOpenPR_AlreadyAppliedChangeIsIdempotent guards against
+// case #4: a repeat investigation reads the default branch (still has the
+// original text) and proposes the same search/replace, but the existing PR
+// branch already has that exact replacement committed from a prior run — so
+// change.Search is legitimately absent there, not because of drift. This
+// must be treated as "already fixed," not fail the whole investigation.
+func TestCreatePR_ExistingOpenPR_AlreadyAppliedChangeIsIdempotent(t *testing.T) {
+	existingBranch := "causely-fix/rc-123-1700000000"
+	state := &fakeGitHub{
+		openPulls: []struct {
+			HTMLURL string `json:"html_url"`
+			Head    struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+		}{
+			{HTMLURL: "https://github.com/org/repo/pull/5", Head: struct {
+				Ref string `json:"ref"`
+			}{Ref: existingBranch}},
+		},
+		// The existing branch already has "fixed" (change.Replace) committed —
+		// "original" (change.Search) is gone because it was already replaced.
+		fileContent: map[string]string{existingBranch: "fixed content"},
+	}
+	server := newFakeGitHubServer(t, state)
+	defer server.Close()
+
+	client := newTestGitHubClient(server.URL)
+	fix := ProposedFix{
+		PRTitle: "fix: typo v2",
+		PRBody:  "body",
+		Changes: []FileChange{{Path: "app.py", Search: "original", Replace: "fixed"}},
+	}
+
+	url, err := client.CreatePR(fix, "rc-123")
+	if err != nil {
+		t.Fatalf("CreatePR() error = %v, want nil — an already-applied change should be treated as idempotent", err)
+	}
+	if url != "https://github.com/org/repo/pull/5" {
+		t.Errorf("CreatePR() url = %q, want the existing PR URL", url)
+	}
+	if len(state.commits) != 0 {
+		t.Errorf("expected no commit — the change is already present, want a no-op, got commits=%v", state.commits)
+	}
+}
+
+// TestCreatePR_ExistingOpenPR_SearchMissingFromBaseAndExistingIsAnError
+// guards the fix for the silent-skip bug: applyFileChangesSequentially used
+// to skip (not error on) a change whose search text wasn't found even in the
+// base branch, letting "expected" default to unmodified base content. If the
+// existing branch ALSO happens to equal that same unmodified content (a
+// genuinely never-applied, invalid proposal), the old code would compare
+// current == expected, find them equal, and falsely report "already
+// applied" — silently leaving the real problem unfixed. Both base and the
+// existing branch here lack the search text entirely; this must be a real
+// error, not a false no-op success.
+func TestCreatePR_ExistingOpenPR_SearchMissingFromBaseAndExistingIsAnError(t *testing.T) {
+	existingBranch := "causely-fix/rc-123-1700000000"
+	const untouchedContent = "unrelated_setting = 1\n"
+	state := &fakeGitHub{
+		openPulls: []struct {
+			HTMLURL string `json:"html_url"`
+			Head    struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+		}{
+			{HTMLURL: "https://github.com/org/repo/pull/5", Head: struct {
+				Ref string `json:"ref"`
+			}{Ref: existingBranch}},
+		},
+		fileContent: map[string]string{
+			// "main" is the fake server's hardcoded default branch. Both it
+			// and the existing branch are identical, untouched content —
+			// neither has ever seen this change applied, because the search
+			// text was never valid against this file at all.
+			"main":         untouchedContent,
+			existingBranch: untouchedContent,
+		},
+	}
+	server := newFakeGitHubServer(t, state)
+	defer server.Close()
+
+	client := newTestGitHubClient(server.URL)
+	fix := ProposedFix{
+		PRTitle: "fix: bogus setting",
+		PRBody:  "body",
+		Changes: []FileChange{{Path: "app.py", Search: "target_setting = false", Replace: "target_setting = true"}},
+	}
+
+	_, err := client.CreatePR(fix, "rc-123")
+	if err == nil {
+		t.Fatal("CreatePR() should error — the search text was never valid against base OR the existing branch; this must not be reported as a false idempotent no-op")
+	}
+	if len(state.commits) != 0 {
+		t.Errorf("expected no commit on a genuinely invalid change, got commits=%v", state.commits)
+	}
+}
+
+// TestCreatePR_ExistingOpenPR_GenericReplacementTextDoesNotFalsePositive
+// guards against a bare strings.Contains(current, change.Replace) check: a
+// short/generic replacement like "true" can legitimately appear elsewhere in
+// the file for unrelated reasons even though THIS specific change was never
+// actually applied. applyChangeIdempotent must compare full expected content,
+// not just check whether the replacement substring exists anywhere.
+func TestCreatePR_ExistingOpenPR_GenericReplacementTextDoesNotFalsePositive(t *testing.T) {
+	existingBranch := "causely-fix/rc-123-1700000000"
+	state := &fakeGitHub{
+		openPulls: []struct {
+			HTMLURL string `json:"html_url"`
+			Head    struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+		}{
+			{HTMLURL: "https://github.com/org/repo/pull/5", Head: struct {
+				Ref string `json:"ref"`
+			}{Ref: existingBranch}},
+		},
+		// "true" appears in the file for an unrelated reason (some other
+		// flag), but the specific change this fix proposes (replacing
+		// "enable_x = false" with "enable_x = true") was never actually
+		// applied — the search text isn't present because it never matched
+		// verbatim in the first place, not because it was already replaced.
+		fileContent: map[string]string{existingBranch: "unrelated_flag = true\nenable_x = maybe"},
+	}
+	server := newFakeGitHubServer(t, state)
+	defer server.Close()
+
+	client := newTestGitHubClient(server.URL)
+	fix := ProposedFix{
+		PRTitle: "fix: enable x",
+		PRBody:  "body",
+		Changes: []FileChange{{Path: "app.py", Search: "enable_x = false", Replace: "enable_x = true"}},
+	}
+
+	_, err := client.CreatePR(fix, "rc-123")
+	if err == nil {
+		t.Fatal("CreatePR() should error — the change was never actually applied, a bare substring match on \"true\" must not be treated as idempotent")
+	}
+	if len(state.commits) != 0 {
+		t.Errorf("expected no commit on a genuine mismatch, got commits=%v", state.commits)
+	}
+}
+
+// TestCreatePR_ExistingOpenPR_TwoChangesToSameFileIsIdempotent guards case
+// #3: a single proposal with two changes to the SAME file, both already
+// applied (from a prior run) on the existing branch. Applying each change
+// independently against the file's current content would make the second
+// change's search text vanish before it's ever reached (since the first
+// change already transformed the file) — this must still be recognized as
+// "already fully applied," not fail partway through.
+func TestCreatePR_ExistingOpenPR_TwoChangesToSameFileIsIdempotent(t *testing.T) {
+	existingBranch := "causely-fix/rc-123-1700000000"
+	state := &fakeGitHub{
+		openPulls: []struct {
+			HTMLURL string `json:"html_url"`
+			Head    struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+		}{
+			{HTMLURL: "https://github.com/org/repo/pull/5", Head: struct {
+				Ref string `json:"ref"`
+			}{Ref: existingBranch}},
+		},
+		fileContent: map[string]string{
+			// "main" is the fake server's hardcoded default branch.
+			"main":         "timeout = 10\nretries = 3\n",
+			existingBranch: "timeout = 30\nretries = 5\n", // both changes already applied here
+		},
+	}
+	server := newFakeGitHubServer(t, state)
+	defer server.Close()
+
+	client := newTestGitHubClient(server.URL)
+	fix := ProposedFix{
+		PRTitle: "fix: retry tuning",
+		PRBody:  "body",
+		Changes: []FileChange{
+			{Path: "app.py", Search: "timeout = 10", Replace: "timeout = 30"},
+			{Path: "app.py", Search: "retries = 3", Replace: "retries = 5"},
+		},
+	}
+
+	url, err := client.CreatePR(fix, "rc-123")
+	if err != nil {
+		t.Fatalf("CreatePR() error = %v, want nil — both changes are already applied, this should be an idempotent no-op", err)
+	}
+	if url != "https://github.com/org/repo/pull/5" {
+		t.Errorf("CreatePR() url = %q, want the existing PR URL", url)
+	}
+	if len(state.commits) != 0 {
+		t.Errorf("expected no commit — both changes already present, got commits=%v", state.commits)
+	}
+}
+
+// TestCreatePR_ExistingOpenPR_TwoChangesToSameFileAppliesBoth guards the
+// normal (non-idempotent) case for the same grouping code path: neither
+// change has been applied yet, both must be applied in one commit.
+func TestCreatePR_ExistingOpenPR_TwoChangesToSameFileAppliesBoth(t *testing.T) {
+	existingBranch := "causely-fix/rc-123-1700000000"
+	state := &fakeGitHub{
+		openPulls: []struct {
+			HTMLURL string `json:"html_url"`
+			Head    struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+		}{
+			{HTMLURL: "https://github.com/org/repo/pull/5", Head: struct {
+				Ref string `json:"ref"`
+			}{Ref: existingBranch}},
+		},
+		fileContent: map[string]string{
+			existingBranch: "timeout = 10\nretries = 3\n",
+		},
+	}
+	server := newFakeGitHubServer(t, state)
+	defer server.Close()
+
+	client := newTestGitHubClient(server.URL)
+	fix := ProposedFix{
+		PRTitle: "fix: retry tuning",
+		PRBody:  "body",
+		Changes: []FileChange{
+			{Path: "app.py", Search: "timeout = 10", Replace: "timeout = 30"},
+			{Path: "app.py", Search: "retries = 3", Replace: "retries = 5"},
+		},
+	}
+
+	_, err := client.CreatePR(fix, "rc-123")
+	if err != nil {
+		t.Fatalf("CreatePR() error = %v", err)
+	}
+	if len(state.commits) != 1 || state.commits[0] != existingBranch {
+		t.Fatalf("expected exactly one commit onto %q, got commits=%v", existingBranch, state.commits)
+	}
+}
+
 func TestSearchCode(t *testing.T) {
 	t.Run("returns matching paths", func(t *testing.T) {
 		mux := http.NewServeMux()

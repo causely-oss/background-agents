@@ -82,11 +82,12 @@ func Run() {
 
 	weekly := newWeeklyBudget(cfg.MaxWeeklyCostUSD, cfg.CostStateFile).withConcurrencyLimit(cfg.MaxConcurrentInvestigations)
 	rec := newRecorder(cfg.InvestigationRecordPath, logger)
-	kc, kcErr := newKubeClient()
+	kc, kcErr := newKubeClient(cfg.ScopeNamespaces)
 	logKubeClientInit(logger, kc, kcErr)
+	dedup := loadTriggerDedup(cfg.TriggerDedupStateFile)
 
 	if cfg.Poll.Enabled {
-		go runPollLoop(logger, cfg, weekly, rec, kc)
+		go runPollLoop(logger, cfg, weekly, rec, kc, dedup)
 	}
 
 	mux := http.NewServeMux()
@@ -95,7 +96,7 @@ func Run() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mux.HandleFunc("POST /slack/actions", handleSlackAction(logger, cfg, weekly, rec, kc))
+	mux.HandleFunc("POST /slack/actions", handleSlackAction(logger, cfg, weekly, rec, kc, dedup))
 
 	mux.HandleFunc("POST /trigger", func(w http.ResponseWriter, r *http.Request) {
 		if !validTriggerAuth(r, cfg.TriggerSharedSecret) {
@@ -117,8 +118,20 @@ func Run() {
 			http.Error(w, "objectId required", http.StatusBadRequest)
 			return
 		}
+		// A webhook retry (sender didn't get an ack in time, a proxy retried,
+		// etc.) delivers the identical notification again — dispatching a
+		// second investigation for it would spend the Anthropic budget and
+		// race PR/workload actions against the first one. See trigger_dedup.go.
+		if !dedup.tryAcquire(triggerSourceWebhook, payload.IssueID, triggerContentHash(payload)) {
+			logger.Info("duplicate or in-flight trigger, skipping", zap.String("issue_id", payload.IssueID))
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
-		go runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourceWebhook)
+		go func() {
+			defer dedup.release(payload.IssueID)
+			runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourceWebhook)
+		}()
 	})
 
 	srv := &http.Server{Addr: ":" + cfg.Port, Handler: mux}

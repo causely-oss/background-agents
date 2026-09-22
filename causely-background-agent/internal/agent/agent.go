@@ -421,7 +421,7 @@ var noActionNeededSchema = json.RawMessage(`{
   "required": ["reasoning"]
 }`)
 
-func buildTools(sources []mcpSource, repo string, kubectlAvailable, acting bool) []anthropicTool {
+func buildTools(sources []mcpSource, repo string, perms *kubePermissions, allowKubernetesMutations bool) []anthropicTool {
 	total := 0
 	for _, s := range sources {
 		total += len(s.Tools)
@@ -476,41 +476,74 @@ func buildTools(sources []mcpSource, repo string, kubectlAvailable, acting bool)
 		},
 	)
 
-	if kubectlAvailable {
-		tools = append(tools,
-			anthropicTool{
+	if perms != nil {
+		if kinds := perms.readableKindsList(); len(kinds) > 0 {
+			tools = append(tools, anthropicTool{
 				Name:        "kubectl_get",
-				Description: "Get a live Kubernetes resource as JSON — the most authoritative source of current cluster state, more so than any cached/indexed view. Supported kinds: deployment, statefulset, daemonset, replicaset, pod, service, configmap. Does NOT return Secret content — use kubectl_get_secret_keys for that.",
-				InputSchema: json.RawMessage(`{"type":"object","properties":{"kind":{"type":"string"},"namespace":{"type":"string"},"name":{"type":"string"}},"required":["kind","namespace","name"]}`),
-			},
-			anthropicTool{
+				Description: fmt.Sprintf("Get a live Kubernetes resource as JSON — the most authoritative source of current cluster state, more so than any cached/indexed view. Supported kinds (only ones this deployment's RBAC actually grants read access to): %s. Does NOT return Secret content — use kubectl_get_secret_keys for that.", strings.Join(kinds, ", ")),
+				InputSchema: kubectlKindSchema(kinds, nil),
+			})
+		}
+		if perms.canReadSecrets {
+			tools = append(tools, anthropicTool{
 				Name:        "kubectl_get_secret_keys",
 				Description: "List the key names (not values) present in a Kubernetes Secret's data — lets you confirm a Secret's shape (e.g. does it have a given config key) without exposing its contents.",
 				InputSchema: json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"name":{"type":"string"}},"required":["namespace","name"]}`),
-			},
-			anthropicTool{
+			})
+		}
+		if perms.canReadPodLogs {
+			tools = append(tools, anthropicTool{
 				Name:        "kubectl_logs",
 				Description: "Fetch recent log lines from a pod's container.",
 				InputSchema: json.RawMessage(`{"type":"object","properties":{"namespace":{"type":"string"},"pod":{"type":"string"},"container":{"type":"string","description":"omit if the pod has only one container"},"tail_lines":{"type":"integer","default":100}},"required":["namespace","pod"]}`),
-			},
-		)
-		if acting {
-			tools = append(tools,
-				anthropicTool{
+			})
+		}
+		if allowKubernetesMutations {
+			if kinds := perms.restartableKindsList(); len(kinds) > 0 {
+				tools = append(tools, anthropicTool{
 					Name:        "kubectl_rollout_restart",
-					Description: "Trigger a rolling restart of a Deployment, StatefulSet, or DaemonSet — equivalent to `kubectl rollout restart`. This executes immediately; only call it once you're confident it's the right remediation.",
-					InputSchema: json.RawMessage(`{"type":"object","properties":{"kind":{"type":"string","enum":["deployment","statefulset","daemonset"]},"namespace":{"type":"string"},"name":{"type":"string"}},"required":["kind","namespace","name"]}`),
-				},
-				anthropicTool{
+					Description: fmt.Sprintf("Trigger a rolling restart of a %s — equivalent to `kubectl rollout restart`. This executes immediately; only call it once you're confident it's the right remediation.", strings.Join(kinds, "/")),
+					InputSchema: kubectlKindSchema(kinds, nil),
+				})
+			}
+			if kinds := perms.scalableKindsList(); len(kinds) > 0 {
+				tools = append(tools, anthropicTool{
 					Name:        "kubectl_scale",
-					Description: "Set the replica count of a Deployment, StatefulSet, or ReplicaSet — equivalent to `kubectl scale`. This executes immediately; only call it once you're confident it's the right remediation.",
-					InputSchema: json.RawMessage(`{"type":"object","properties":{"kind":{"type":"string","enum":["deployment","statefulset","replicaset"]},"namespace":{"type":"string"},"name":{"type":"string"},"replicas":{"type":"integer","minimum":0}},"required":["kind","namespace","name","replicas"]}`),
-				},
-			)
+					Description: fmt.Sprintf("Set the replica count of a %s — equivalent to `kubectl scale`. This executes immediately; only call it once you're confident it's the right remediation.", strings.Join(kinds, "/")),
+					InputSchema: kubectlKindSchema(kinds, json.RawMessage(`{"type":"integer","minimum":0}`)),
+				})
+			}
 		}
 	}
 
 	return tools
+}
+
+// kubectlKindSchema builds the input schema shared by kubectl_get/
+// kubectl_rollout_restart/kubectl_scale, restricting the "kind" property's
+// enum to exactly the kinds RBAC actually grants — built dynamically per
+// deployment (see kubePermissions) rather than a static list covering every
+// kind the code knows how to handle, so the tool's own advertised schema
+// can't claim support for a kind that will just 403. extraProperty, if
+// non-nil, is merged in as an additional required property (used for
+// kubectl_scale's "replicas").
+func kubectlKindSchema(kinds []string, extraReplicas json.RawMessage) json.RawMessage {
+	properties := map[string]any{
+		"kind":      map[string]any{"type": "string", "enum": kinds},
+		"namespace": map[string]any{"type": "string"},
+		"name":      map[string]any{"type": "string"},
+	}
+	required := []string{"kind", "namespace", "name"}
+	if extraReplicas != nil {
+		properties["replicas"] = json.RawMessage(extraReplicas)
+		required = append(required, "replicas")
+	}
+	schema, _ := json.Marshal(map[string]any{
+		"type":       "object",
+		"properties": properties,
+		"required":   required,
+	})
+	return schema
 }
 
 // describeMCPSources renders the configured MCP sources as a bullet list for
@@ -620,7 +653,15 @@ specific — propose_fix.changes must contain exact strings that appear in the c
 // independent of whether the loop finished normally or was aborted.
 func runClaudeLoop(ctx context.Context, cfg Config, payload TriggerPayload, sources []mcpSource, gh *githubClient, kc *kubeClient, log *zap.Logger) (investigationOutcome, *costTracker, []ToolCallSummary, error) {
 	acting := cfg.ActionMode == actionModeAct
-	tools := buildTools(sources, cfg.GitHubRepo, kc != nil, acting)
+	// A second, separate gate on top of acting — see AllowKubernetesMutations
+	// in config.go for why act mode alone isn't enough to authorize
+	// kubectl_rollout_restart/kubectl_scale.
+	allowKubernetesMutations := acting && cfg.AllowKubernetesMutations
+	var perms *kubePermissions
+	if kc != nil {
+		perms = &kc.perms
+	}
+	tools := buildTools(sources, cfg.GitHubRepo, perms, allowKubernetesMutations)
 
 	messages := []anthropicMessage{{
 		Role:    "user",
@@ -820,14 +861,14 @@ func runClaudeLoop(ctx context.Context, cfg Config, payload TriggerPayload, sour
 				}
 				result, callErr = kc.GetPodLogs(context.Background(), ns, pod, container, tailLines)
 
-			case tc.Name == "kubectl_rollout_restart" && kc != nil && acting:
+			case tc.Name == "kubectl_rollout_restart" && kc != nil && allowKubernetesMutations:
 				server = "kubectl"
 				kind, _ := args["kind"].(string)
 				ns, _ := args["namespace"].(string)
 				name, _ := args["name"].(string)
 				result, callErr = kc.RolloutRestart(context.Background(), kind, ns, name)
 
-			case tc.Name == "kubectl_scale" && kc != nil && acting:
+			case tc.Name == "kubectl_scale" && kc != nil && allowKubernetesMutations:
 				server = "kubectl"
 				kind, _ := args["kind"].(string)
 				ns, _ := args["namespace"].(string)

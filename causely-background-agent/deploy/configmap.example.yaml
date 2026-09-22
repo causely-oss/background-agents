@@ -69,6 +69,21 @@ data:
     # observe until you trust the configuration.
     action_mode: "observe"
 
+    # A second, separate gate in front of kubectl_rollout_restart/
+    # kubectl_scale, on top of action_mode: act. act mode alone (opening PRs,
+    # posting to Slack) is a much smaller blast radius than directly mutating
+    # a live workload — this defaults to false so enabling act mode doesn't
+    # silently also hand an LLM production restart/scale authority. Also
+    # requires deploy/rbac.yaml's mutate ClusterRole to actually be bound in
+    # scope_namespaces above.
+    allow_kubernetes_mutations: false
+
+    # Persists the webhook/poll/Slack dedup watermark (see trigger_dedup.go)
+    # across restarts, so a retry that happens to land right after a restart
+    # is still recognized as a duplicate. Optional — dedup still works for
+    # the lifetime of one process without this, it just resets on restart.
+    trigger_dedup_state_file: "/data/trigger-dedup.json"
+
     # Appends one JSON-lines InvestigationRecord per run — the dataset behind
     # "how well is this actually working." See investigation_record.go.
     investigation_record_path: "/data/investigations.jsonl"

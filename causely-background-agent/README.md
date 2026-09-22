@@ -181,23 +181,37 @@ source change.
 
 ## kubectl access
 
-If `deploy/rbac.yaml` is applied, the agent gets `kubectl_get`,
-`kubectl_get_secret_keys`, and `kubectl_logs` — direct, live cluster state
-that's more authoritative than any cached/indexed view (including Causely's
-own `get_config` MCP tool), since it reflects the cluster at the moment of the
-call. These read tools are granted **cluster-wide**, deliberately: a root
-cause's actual dependency is often outside the namespace of the service it's
-degrading (e.g. an app in `causely` failing because of something in
-`monitoring`), and diagnosis shouldn't be namespace-blind. In `act` mode, two
-mutating tools are also offered: `kubectl_rollout_restart` and
-`kubectl_scale`, letting the agent actually apply a remediation instead of
-only describing one in Slack — these are scoped per-namespace (matching
-`scope_namespaces`), not cluster-wide, since a bad restart/scale call has a
-much bigger blast radius than a bad read. `kubectl_get` never returns Secret
-content — `kubectl_get_secret_keys` returns only a Secret's key names, never
-decoded values, since Secret content flowing into Claude's context risks it
-being echoed into a PR body, Slack message, or the investigation record. If
-RBAC isn't applied, the agent starts fine and simply omits these tools for
+If `deploy/rbac.yaml` is applied, the agent gets `kubectl_get` and
+`kubectl_logs` — direct, live cluster state that's more authoritative than any
+cached/indexed view (including Causely's own `get_config` MCP tool), since it
+reflects the cluster at the moment of the call. These read tools are granted
+**cluster-wide**, deliberately: a root cause's actual dependency is often
+outside the namespace of the service it's degrading (e.g. an app in `causely`
+failing because of something in `monitoring`), and diagnosis shouldn't be
+namespace-blind. Each kubectl tool is only offered when RBAC actually grants
+the corresponding permission — checked at startup via
+`SelfSubjectAccessReview`, not merely whether in-cluster credentials exist —
+so a partial grant (e.g. reads but not secrets) offers exactly the tools that
+will work, not ones that would just fail RBAC on the first call.
+
+`kubectl_get_secret_keys` is **not** part of `deploy/rbac.yaml` — it requires
+a separate, deliberate `kubectl apply -f deploy/rbac-secrets.example.yaml`,
+namespace-scoped, never cluster-wide (putting it in the same file as the
+default-applied manifest, even with an "opt-in" comment, meant it was applied
+by default regardless — `kubectl apply -f` doesn't read comments). `kubectl_get`
+never returns Secret content; `kubectl_get_secret_keys` returns only a
+Secret's key names, never decoded values, since Secret content flowing into
+Claude's context risks it being echoed into a PR body, Slack message, or the
+investigation record.
+
+`kubectl_rollout_restart`/`kubectl_scale` require **both** `action_mode: act`
+*and* `allow_kubernetes_mutations: true` in config.yaml (default `false`) —
+act mode alone (opening PRs, posting to Slack) is a much smaller blast radius
+than directly mutating a live workload, so enabling it doesn't silently also
+hand an LLM production restart/scale authority; that's a separate, deliberate
+opt-in. These are scoped per-namespace (matching `scope_namespaces`), not
+cluster-wide, since a bad restart/scale call has a much bigger blast radius
+than a bad read. If RBAC isn't applied, the agent starts fine and simply omits these tools for
 that run — see `newKubeClient` in `kube.go`.
 
 Everything these tools *do* return — ConfigMap data, pod logs, resource
@@ -366,6 +380,7 @@ plain Kubernetes manifests under `deploy/` — no Helm/chart dependency.
   it, Kubernetes will refuse to schedule the pod (no matching volume), rather
   than silently falling back to ephemeral storage.
 - RBAC can't restrict a Role to only a Secret's key names, not its decoded
-  values — `deploy/rbac.yaml` grants `get`/`list` on the full Secret object;
-  the safety boundary that `kubectl_get_secret_keys` never returns decoded
-  values is enforced in this agent's own code (`kube.go`), not by RBAC.
+  values — `deploy/rbac-secrets.example.yaml` (opt-in, namespace-scoped, see
+  above) grants `get`/`list` on the full Secret object; the safety boundary
+  that `kubectl_get_secret_keys` never returns decoded values is enforced in
+  this agent's own code (`kube.go`), not by RBAC.

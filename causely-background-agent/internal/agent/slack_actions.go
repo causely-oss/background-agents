@@ -32,7 +32,7 @@ type slackActionPayload struct {
 // handleSlackAction handles POST /slack/actions from Slack interactive components.
 // It verifies the request signature, extracts the causely_fix_it action, and
 // launches a remediation investigation as a goroutine.
-func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *recorder, kc *kubeClient) http.HandlerFunc {
+func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec *recorder, kc *kubeClient, dedup *triggerDedup) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 		if err != nil {
@@ -105,10 +105,25 @@ func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec
 			SlackThreadTS: action.Message.TS,
 		}
 
+		// Only the in-flight guard applies here, not persisted content-hash
+		// replay suppression — see tryAcquireInFlightOnly's doc comment for
+		// why: a double-click must still be rejected, but a deliberate
+		// second click by a human (including retrying after a failed
+		// investigation) must not be silently swallowed forever just because
+		// the issue's content hasn't changed.
+		if !dedup.tryAcquireInFlightOnly(payload.IssueID) {
+			logger.Info("investigation already in flight for this issue, skipping slack action", zap.String("issue_id", payload.IssueID))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		// Respond to Slack within 3 seconds or it retries.
 		w.WriteHeader(http.StatusOK)
 
-		go runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourceSlackFixIt)
+		go func() {
+			defer dedup.release(payload.IssueID)
+			runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourceSlackFixIt)
+		}()
 	}
 }
 
