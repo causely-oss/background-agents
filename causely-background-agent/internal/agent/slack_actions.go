@@ -60,49 +60,14 @@ func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec
 			return
 		}
 
-		var action slackActionPayload
-		if err := json.Unmarshal([]byte(raw), &action); err != nil {
-			http.Error(w, "invalid payload json", http.StatusBadRequest)
+		payload, found, err := parseSlackFixItAction([]byte(raw))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-
-		// Find the causely_fix_it action.
-		var value string
-		for _, a := range action.Actions {
-			if a.ActionID == "causely_fix_it" {
-				value = a.Value
-				break
-			}
-		}
-		if value == "" {
+		if !found {
 			w.WriteHeader(http.StatusOK) // unknown action — ack and ignore
 			return
-		}
-
-		var val struct {
-			IssueID       string `json:"issue_id"`
-			EntityID      string `json:"entity_id"`
-			EntityName    string `json:"entity_name"`
-			DiagnosisName string `json:"diagnosis_name"`
-			Severity      string `json:"severity"`
-			Description   string `json:"description"`
-			Remediation   string `json:"remediation"`
-		}
-		if err := json.Unmarshal([]byte(value), &val); err != nil {
-			http.Error(w, "invalid action value", http.StatusBadRequest)
-			return
-		}
-
-		payload := TriggerPayload{
-			IssueID:       val.IssueID,
-			EntityID:      val.EntityID,
-			EntityName:    val.EntityName,
-			DiagnosisName: val.DiagnosisName,
-			Severity:      val.Severity,
-			Description:   val.Description,
-			Remediation:   val.Remediation,
-			SlackChannel:  action.Channel.ID,
-			SlackThreadTS: action.Message.TS,
 		}
 
 		// Only the in-flight guard applies here, not persisted content-hash
@@ -125,6 +90,65 @@ func handleSlackAction(logger *zap.Logger, cfg Config, weekly *weeklyBudget, rec
 			runAgent(logger, cfg, payload, weekly, rec, kc, triggerSourceSlackFixIt)
 		}()
 	}
+}
+
+// parseSlackFixItAction extracts a TriggerPayload from a raw Slack
+// block_actions payload. found is false (with a nil error) when the payload
+// doesn't contain a "causely_fix_it" action — a normal, expected case for
+// any other interactive component Slack might deliver to this same endpoint.
+func parseSlackFixItAction(raw []byte) (payload TriggerPayload, found bool, err error) {
+	var action slackActionPayload
+	if err := json.Unmarshal(raw, &action); err != nil {
+		return TriggerPayload{}, false, fmt.Errorf("invalid payload json: %w", err)
+	}
+
+	var value string
+	for _, a := range action.Actions {
+		if a.ActionID == "causely_fix_it" {
+			value = a.Value
+			break
+		}
+	}
+	if value == "" {
+		return TriggerPayload{}, false, nil
+	}
+
+	var val struct {
+		IssueID       string `json:"issue_id"`
+		EntityID      string `json:"entity_id"`
+		EntityName    string `json:"entity_name"`
+		DiagnosisName string `json:"diagnosis_name"`
+		Severity      string `json:"severity"`
+		Description   string `json:"description"`
+		Remediation   string `json:"remediation"`
+		// Without these two, inScope (scope.go) silently misbehaves on every
+		// Slack-triggered click: GitHubRepoLabel's check only applies "if
+		// set," so it's a silent no-op here (fails open); worse, if
+		// scope_namespaces IS configured, EntityNamespace always being ""
+		// makes inScope reject every single click outright, regardless of
+		// the real namespace (fails closed on everything). Found in review,
+		// not dogfooding — this path was previously untested against a
+		// scope_namespaces-configured deployment.
+		EntityNamespace string `json:"entity_namespace"`
+		GitHubRepoLabel string `json:"github_repo_label"`
+	}
+	if err := json.Unmarshal([]byte(value), &val); err != nil {
+		return TriggerPayload{}, false, fmt.Errorf("invalid action value: %w", err)
+	}
+
+	return TriggerPayload{
+		IssueID:         val.IssueID,
+		EntityID:        val.EntityID,
+		EntityName:      val.EntityName,
+		DiagnosisName:   val.DiagnosisName,
+		Severity:        val.Severity,
+		Description:     val.Description,
+		Remediation:     val.Remediation,
+		SlackChannel:    action.Channel.ID,
+		SlackThreadTS:   action.Message.TS,
+		EntityNamespace: val.EntityNamespace,
+		GitHubRepoLabel: val.GitHubRepoLabel,
+	}, true, nil
 }
 
 // verifySlackSignature checks the X-Slack-Signature header against the signing secret.

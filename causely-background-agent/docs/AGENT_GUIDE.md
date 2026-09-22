@@ -27,11 +27,13 @@ At a high level, one investigation run does:
    MCP tools (issue/diagnosis detail, topology, logs, metrics) and GitHub
    read-only tools (`read_file`, `list_directory`, `search_code`) to build a
    picture of the incident.
-4. Claude terminates the loop by calling exactly one of two tools:
+4. Claude terminates the loop by calling exactly one of three tools:
    - `recommend_remediation` — an immediate action (restart, rollback, scale,
      revert a config). No code change, no PR.
    - `propose_fix` — a structured PR (title, body, exact search/replace file
      changes) for a genuine code-level bug that an immediate action can't fix.
+   - `no_action_needed` — the investigation found no actionable root cause
+     (e.g. transient, already resolved, or genuinely unclear).
 5. Depending on **action mode** (§ below), the agent either just records what
    it would do, or actually posts to Slack / opens the PR.
 6. Regardless of outcome, one `InvestigationRecord` (§ below) is appended to
@@ -138,7 +140,7 @@ Issue detected
                                             ├──tools/call──▶ Causely/extra MCP servers  (evidence gathering)
                                             ├──GET contents/search──▶ GitHub API        (read_file, list_directory, search_code)
                                             │
-                                            └──terminates on recommend_remediation OR propose_fix
+                                            └──terminates on recommend_remediation, propose_fix, OR no_action_needed
                                                      │
                               ┌──────────────────────┴──────────────────────┐
                               ▼ (observe mode: stop here, just record)       ▼ (act mode)
@@ -176,13 +178,14 @@ before wiring, since this agent's repo doesn't own that contract.)
   iterations (`agent.go: runClaudeLoop`), model `claude-sonnet-4-6`
   (`cost.go: claudeModel`).
 - Tools presented to Claude = every MCP server's tools (prefixed
-  `<server-name>__`, e.g. `causely__get_issue_details`) + 5 built-ins:
+  `<server-name>__`, e.g. `causely__get_issue_details`) + 6 built-ins:
   `read_file`, `list_directory`, `search_code`, `propose_fix`,
-  `recommend_remediation`.
+  `recommend_remediation`, `no_action_needed`.
 - The system prompt (`buildSystemPrompt`) explicitly biases Claude toward
   `recommend_remediation` first, and only toward `propose_fix` (which costs a
   PR, code changes, review overhead) when an immediate action can't resolve
-  the underlying issue.
+  the underlying issue. `no_action_needed` is the explicit escape hatch when
+  neither applies — no code change, no remediation, just a recorded verdict.
 - Model pricing is hardcoded in `cost.go: modelPricing` — needs periodic
   manual re-verification against https://www.anthropic.com/pricing since
   there's no dynamic pricing lookup.

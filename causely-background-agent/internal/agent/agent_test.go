@@ -218,6 +218,53 @@ func TestBuildTools_MutationsRequireBothActModeAndOwnPermission(t *testing.T) {
 // all kinds it mechanically knows how to handle just because ONE kind (or
 // one coarse "workloads" bucket) is granted. Only "pod" is readable here;
 // only "deployment" is patchable; only "replicaset" is updatable.
+// TestParseScaleReplicas_MissingOrMistypedIsRejected guards against a
+// malformed/missing replicas argument silently defaulting to a real
+// scale-to-zero call — ScaleResource only rejects negative values, so a
+// zero-value default from a failed type assertion would otherwise sail
+// through as a legitimate "scale to 0" on a live workload.
+func TestParseScaleReplicas_MissingOrMistypedIsRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+	}{
+		{"missing entirely", map[string]any{"kind": "deployment"}},
+		{"string instead of number", map[string]any{"replicas": "3"}},
+		{"null", map[string]any{"replicas": nil}},
+		{"bool", map[string]any{"replicas": true}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseScaleReplicas(tt.args)
+			if err == nil {
+				t.Errorf("parseScaleReplicas(%v) should have errored, not silently defaulted to 0", tt.args)
+			}
+		})
+	}
+}
+
+func TestParseScaleReplicas_ValidNumberIsAccepted(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		want int32
+	}{
+		{"positive", map[string]any{"replicas": float64(3)}, 3},
+		{"explicit zero is a legitimate scale-down, not the bug case", map[string]any{"replicas": float64(0)}, 0},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseScaleReplicas(tt.args)
+			if err != nil {
+				t.Fatalf("parseScaleReplicas(%v) error = %v", tt.args, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseScaleReplicas(%v) = %d, want %d", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildTools_PerKindRBACGating(t *testing.T) {
 	perms := &kubePermissions{
 		readableKinds:    map[string]bool{"pod": true, "deployment": false, "service": false},

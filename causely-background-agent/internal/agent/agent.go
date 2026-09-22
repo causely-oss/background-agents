@@ -546,6 +546,20 @@ func kubectlKindSchema(kinds []string, extraReplicas json.RawMessage) json.RawMe
 	return schema
 }
 
+// parseScaleReplicas validates and extracts kubectl_scale's "replicas"
+// argument. A missing/mistyped value must be rejected outright, not
+// silently default to 0 — ScaleResource (kube.go) only guards against
+// negative values, so a zero-value default from a failed type assertion
+// would turn a malformed tool call into an actual scale-to-zero on a live
+// workload instead of an error.
+func parseScaleReplicas(args map[string]any) (int32, error) {
+	v, ok := args["replicas"].(float64)
+	if !ok {
+		return 0, fmt.Errorf("kubectl_scale: replicas is required and must be a number, got %#v", args["replicas"])
+	}
+	return int32(v), nil
+}
+
 // describeMCPSources renders the configured MCP sources as a bullet list for
 // the system prompt, so Claude knows what each tool-name prefix is for
 // beyond what the individual tool descriptions say — important once there's
@@ -873,9 +887,10 @@ func runClaudeLoop(ctx context.Context, cfg Config, payload TriggerPayload, sour
 				kind, _ := args["kind"].(string)
 				ns, _ := args["namespace"].(string)
 				name, _ := args["name"].(string)
-				var replicas int32
-				if v, ok := args["replicas"].(float64); ok {
-					replicas = int32(v)
+				replicas, err := parseScaleReplicas(args)
+				if err != nil {
+					callErr = err
+					break
 				}
 				result, callErr = kc.ScaleResource(context.Background(), kind, ns, name, replicas)
 
