@@ -1,0 +1,141 @@
+# Deployment + Service for causely-background-agent. Requires:
+#   - pvc.yaml applied first — /data (investigation records, weekly cost
+#     state, poll watermark) is backed by a PersistentVolumeClaim so it
+#     survives pod recreation, not just container restarts.
+#   - rbac.yaml applied (ServiceAccount + ClusterRole + a RoleBinding per
+#     target namespace) for the kubectl_* tools to be available at all — if
+#     skipped, the agent starts fine but omits those tools (see kube.go).
+#   - a ConfigMap named causely-background-agent (see configmap.example.yaml)
+#   - a Secret named causely-background-agent with keys: anthropic-api-key, github-token,
+#     slack-bot-token, slack-signing-secret, causely-mcp-token
+#     (optional, bearer-token auth to the Causely MCP server), causely-mcp-client-id
+#     + causely-mcp-client-secret (optional, HTTP Basic auth to the Causely MCP
+#     server instead — for a tenant with Frontegg auth enabled; set both or
+#     neither, and prefer these over causely-mcp-token if the tenant supports
+#     both), trigger-shared-secret. trigger-shared-secret and
+#     slack-signing-secret are REQUIRED — the agent refuses to start without
+#     them unless config.yaml explicitly opts into
+#     allow_unauthenticated_trigger / allow_unauthenticated_slack_actions (see
+#     README.md). Create the Secret out-of-band, e.g.:
+#       kubectl create secret generic causely-background-agent \
+#         --from-literal=anthropic-api-key=... \
+#         --from-literal=github-token=... \
+#         --from-literal=slack-bot-token=... \
+#         --from-literal=slack-signing-secret=... \
+#         --from-literal=trigger-shared-secret=$(openssl rand -hex 32)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: causely-background-agent
+  labels:
+    app: causely-background-agent
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # single replica + a local data volume; avoid two pods racing on it
+  selector:
+    matchLabels:
+      app: causely-background-agent
+  template:
+    metadata:
+      labels:
+        app: causely-background-agent
+    spec:
+      serviceAccountName: causely-background-agent
+      # fsGroup: 3000 matches the "causely" group (gid 3000) the Dockerfile's
+      # non-root user runs as. Without this, a freshly-provisioned PVC (e.g.
+      # EBS via gp2) mounts /data root-owned, and the app — writing
+      # investigation records, weekly cost state, and the poll watermark —
+      # gets silent permission-denied errors on every write. Confirmed live:
+      # a manual write to /data failed with "Permission denied" before this
+      # was added. emptyDir didn't have this problem (kubelet creates it
+      # already owned by the pod), which is why it went unnoticed until the
+      # PVC switch.
+      securityContext:
+        fsGroup: 3000
+      containers:
+        - name: causely-background-agent
+          image: docker.io/causelyai/causely-background-agent:latest
+          command: ["/bin/causely-background-agent"]
+          args: ["-config", "/config/config.yaml"]
+          env:
+            # Telemetry is opt-in, not included below: initTelemetry in
+            # telemetry.go no-ops when OTEL_EXPORTER_OTLP_ENDPOINT is unset —
+            # it doesn't fail closed. A prior version of this manifest baked
+            # in Causely's own internal dev-cluster OTLP endpoint and
+            # environment name as if they were generic defaults; a comment
+            # saying "change this" doesn't stop `kubectl apply`/copy-paste
+            # from deploying them unchanged. To enable telemetry, add your own:
+            #   - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            #     value: http://<your-otlp-collector>:4317
+            #   - name: OTEL_EXPORTER_OTLP_PROTOCOL
+            #     value: grpc
+            #   - name: OTEL_RESOURCE_ATTRIBUTES
+            #     value: service.name=causely-background-agent,deployment.environment.name=<your-environment>
+            - name: K8S_POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: K8S_POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+            - name: K8S_NAMESPACE_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: K8S_NODE_NAME
+              valueFrom: { fieldRef: { fieldPath: spec.nodeName } }
+            - name: K8S_DEPLOYMENT_NAME
+              value: causely-background-agent
+            - name: K8S_CONTAINER_NAME
+              value: causely-background-agent
+            - name: ANTHROPIC_API_KEY
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: anthropic-api-key } }
+            - name: GITHUB_TOKEN
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: github-token } }
+            - name: SLACK_BOT_TOKEN
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: slack-bot-token } }
+            - name: SLACK_SIGNING_SECRET
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: slack-signing-secret } }
+            - name: CAUSELY_MCP_TOKEN
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-token, optional: true } }
+            - name: CAUSELY_MCP_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-client-id, optional: true } }
+            - name: CAUSELY_MCP_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: causely-mcp-client-secret, optional: true } }
+            - name: TRIGGER_SHARED_SECRET
+              valueFrom: { secretKeyRef: { name: causely-background-agent, key: trigger-shared-secret } }
+          ports:
+            - name: webserver
+              containerPort: 8090
+          livenessProbe:
+            httpGet: { path: /healthz, port: webserver }
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /healthz, port: webserver }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+          volumeMounts:
+            - mountPath: /config
+              name: config
+              readOnly: true
+            - mountPath: /data
+              name: data
+      volumes:
+        - name: config
+          configMap:
+            name: causely-background-agent
+        - name: data
+          persistentVolumeClaim:
+            claimName: causely-background-agent-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: causely-background-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: causely-background-agent
+  ports:
+    - name: webserver
+      port: 8090

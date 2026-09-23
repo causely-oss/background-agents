@@ -1,0 +1,98 @@
+# RBAC for causely-background-agent's kubectl_* tools (see kube.go). The agent
+# auto-detects in-cluster credentials at startup; if this isn't applied,
+# kubectl tools are simply omitted — no fatal error, see newKubeClient.
+#
+# Split into two ClusterRoles, bound differently, on purpose:
+#   - Read (get/list/logs) is bound CLUSTER-WIDE. An Issue's actual
+#     dependency is often outside the namespace of the service it's degrading
+#     (found dogfooding: a gateway issue in "causely" needed to inspect
+#     Prometheus in "monitoring" — RBAC scoped to just "causely" blocked
+#     exactly the independent verification kubectl access exists for).
+#     Diagnosis should not be namespace-blind.
+#   - Mutate (kubectl_rollout_restart/kubectl_scale, act mode only — see
+#     buildTools in agent.go) is bound per-namespace, matching
+#     scope_namespaces in config.yaml. Read broadly, act narrowly: a bad
+#     restart/scale call has a much bigger blast radius than a bad read.
+#
+# Secrets are deliberately NOT in the cluster-wide read ClusterRole below, and
+# deliberately NOT in this file at all — see rbac-secrets.example.yaml. RBAC
+# has no way to grant "get" on a Secret's metadata/keys without also granting
+# its decoded data — kubectl_get_secret_keys only ever returns key names (see
+# kubeClient.GetSecretKeys in kube.go), but that's a code-level filter, not an
+# RBAC boundary, and code-level filtering doesn't reduce what the
+# ServiceAccount token itself is authorized to read. A prior version of this
+# file put the opt-in Secret Role/RoleBinding at the bottom of THIS file —
+# review caught that `kubectl apply -f deploy/rbac.yaml` (as documented in
+# README.md) applies every document in a multi-doc YAML regardless of intent,
+# so "opt-in" sitting in the same file as the default-applied manifest was
+# opt-in in name only. It now requires a separate, deliberate
+# `kubectl apply -f deploy/rbac-secrets.example.yaml`.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: causely-background-agent
+  # Placeholder — change to whatever namespace you actually run
+  # deployment.yaml in (deployment.yaml itself has no namespace field, so it
+  # takes whatever `kubectl apply -n <namespace>` you use). Every
+  # "namespace: causely-mediation" below must match this same value.
+  namespace: causely-mediation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: causely-background-agent-read
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "services", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: causely-background-agent-read
+subjects:
+  - kind: ServiceAccount
+    name: causely-background-agent
+    namespace: causely-mediation # must match the ServiceAccount's namespace above
+roleRef:
+  kind: ClusterRole
+  name: causely-background-agent-read
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: causely-background-agent-mutate
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["patch"] # rollout restart
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "replicasets"]
+    verbs: ["update"] # scale
+---
+# Example RoleBinding scoping mutate access to ONE target namespace — copy
+# this block per namespace listed in config.yaml's scope_namespaces. A
+# ClusterRole bound via a namespaced RoleBinding only grants access within
+# that RoleBinding's namespace, not cluster-wide, despite the permissions
+# being defined on a ClusterRole (the standard way to reuse one rule set
+# across multiple, but not all, namespaces).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: causely-background-agent-mutate
+  namespace: causely # change to match scope_namespaces in config.yaml
+subjects:
+  - kind: ServiceAccount
+    name: causely-background-agent
+    namespace: causely-mediation # must match the ServiceAccount's namespace above
+roleRef:
+  kind: ClusterRole
+  name: causely-background-agent-mutate
+  apiGroup: rbac.authorization.k8s.io
