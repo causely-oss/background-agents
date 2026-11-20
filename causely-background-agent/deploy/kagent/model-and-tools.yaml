@@ -1,0 +1,39 @@
+# Anthropic ModelConfig and the Causely RemoteMCPServer referenced by
+# agenttemplate.yaml. Create the Secrets first (see secrets.md).
+apiVersion: api.kagent.dev/v1alpha3
+kind: ModelConfig
+metadata:
+  name: causely-anthropic
+  namespace: kagent
+spec:
+  provider: Anthropic
+  model: claude-opus-5-5
+  # kagent injects this as ANTHROPIC_API_KEY. Hermes strips it from every
+  # terminal subprocess, so the agent cannot read it back.
+  apiKeySecret: causely-hermes-anthropic
+  apiKeySecretKey: api-key
+  anthropic:
+    maxTokens: 16384
+---
+# Causely's MCP server. Use the hosted endpoint, or an in-cluster address if
+# you run the Causely MCP service next to the mediator.
+apiVersion: api.kagent.dev/v1alpha3
+kind: RemoteMCPServer
+metadata:
+  name: causely
+  namespace: kagent
+spec:
+  description: Causely causal reasoning, issues, diagnoses, topology, logs and config.
+  protocol: STREAMABLE_HTTP
+  url: https://api.causely.app/mcp
+  timeout: 120s
+  # kagent resolves Secret-backed headers to an Actor env var and passes the
+  # header as __KAGENT_ENV[NAME]__; the adapter rewrites that to ${NAME},
+  # which Hermes interpolates at connect time, so the token never lands in
+  # Hermes' config.yaml.
+  headersFrom:
+    - name: Authorization
+      valueFrom:
+        type: Secret
+        name: causely-hermes-causely-mcp
+        key: authorization # the full header value, e.g. "Bearer <token>"

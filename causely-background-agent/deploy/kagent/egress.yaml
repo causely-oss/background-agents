@@ -1,0 +1,35 @@
+# Network access the investigator needs beyond what kagent opens on its own.
+# Substrate Actors reach only the model endpoint, the MCP servers and the
+# kagent control plane by default; the Agent (agenttemplate.yaml) lists this
+# policy in egressPolicyRefs.
+#
+# The GitHub token never enters the Actor. gh and git send a placeholder
+# Authorization header (GH_TOKEN=egress-injected in harness.yaml) and the
+# egress gateway replaces it with the credential from the Secret. Create the
+# Secret as in secrets.md:
+#   api-token:  the token itself, for the REST API (gh, the ledger)
+#   git-basic:  base64("x-access-token:<token>"), for git over HTTPS
+apiVersion: api.kagent.dev/v1alpha3
+kind: EgressPolicy
+metadata:
+  name: causely-github
+  namespace: kagent
+spec:
+  destinations:
+    - origin: https://api.github.com
+      authentication:
+        header: Authorization
+        prefix: "Bearer "
+        secretKeyRef:
+          name: causely-hermes-github
+          key: api-token
+    - origin: https://github.com
+      authentication:
+        header: Authorization
+        prefix: "Basic "
+        secretKeyRef:
+          name: causely-hermes-github
+          key: git-basic
+    # Archive downloads and raw files gh may follow redirects to.
+    - origin: https://codeload.github.com
+    - origin: https://objects.githubusercontent.com
