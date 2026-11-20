@@ -1,352 +1,218 @@
-# causely-background-agent — Guide
+# Causely investigator on Hermes + kagent: operator guide
 
-Audience: any human or agent that needs to understand, operate, or deploy
-`causely-background-agent` without reading the Go source first. For design
-rationale and known limitations, `README.md` in the repo root is the other
-primary reference — this doc goes deeper on the three questions that come up
-most: what it is, how it's wired end-to-end, and how to deploy it.
+This guide walks through what an investigation does, how to deploy it, and how
+to move from observe to act safely. The [README](../README.md) is the
+reference (architecture, safety model, config mapping, what changed from the
+Go service); this is the walkthrough.
 
----
+## 1. The pieces
 
-## 1. What is causely-background-agent
+| Resource | Owner decides | File |
+|---|---|---|
+| **Harness** `causely-hermes` | the image, and the deployment policy: observe/act, cluster writes, repository, namespace scope, time limit | `deploy/kagent/harness.yaml` |
+| **AgentTemplate** `causely-investigator` | how to investigate (system prompt) and which Causely tools the model sees | `deploy/kagent/agenttemplate.yaml` |
+| **Agent** `causely-investigator` | which template runs on which Harness, and which EgressPolicies it gets | `deploy/kagent/agenttemplate.yaml` |
+| **EgressPolicy** `causely-github` | which hosts beyond the model and MCP servers the Actor may reach, and the GitHub token the egress gateway adds | `deploy/kagent/egress.yaml` |
+| **ModelConfig** `causely-anthropic` | model and API key | `deploy/kagent/model-and-tools.yaml` |
+| **RemoteMCPServer** `causely` | Causely MCP URL and auth header | `deploy/kagent/model-and-tools.yaml` |
+| **ServiceAccount + RBAC** `causely-investigator` | what kubectl can see and change | `deploy/kagent/rbac.yaml`, `rbac-mutate.example.yaml` |
+| **Skill** `causely-investigation` | ledger, sweep and command recipes, report format (baked into the image) | `skills/causely-investigation/SKILL.md` |
+| **ScheduledRun** `causely-sweep` | when sweeps run and what they look at (gRPC, not a CRD) | `deploy/kagent/scheduled-sweep.json` |
+| **Mediator A2A destination** | which Causely notifications are pushed (configured in Causely) | `deploy/kagent/triggering.md` |
+| **Ledger** (GitHub issues labeled `causely-investigation`) | shared "already investigated" state across runs | in `CAUSELY_GITHUB_REPO` |
 
-A standalone Go service that turns a Causely-detected Kubernetes Issue
-into either an immediate remediation recommendation or a GitHub pull request
-with a code-level fix. It is a **reference implementation** on top of
-Causely's MCP server — not a required part of using Causely, and not
-Causely's own product surface (that's the MCP server itself). Anyone could
-build a different agent against the same MCP tools; this one exists as a
-working example and as Causely's own dogfood instance.
+Splitting the Harness (policy) from the AgentTemplate (behavior) is
+deliberate: the people tuning the prompt should not be able to grant the agent
+write access by editing it.
 
-At a high level, one investigation run does:
+## 2. What one investigation looks like
 
-1. Receive a trigger (see §2) identifying an Issue + entity.
-2. Load tool lists from every configured MCP server (Causely's, plus any
-   extras like Grafana).
-3. Run a Claude tool-use loop (`agent.go: runClaudeLoop`) where Claude calls
-   MCP tools (issue/diagnosis detail, topology, logs, metrics) and GitHub
-   read-only tools (`read_file`, `list_directory`, `search_code`) to build a
-   picture of the incident.
-4. Claude terminates the loop by calling exactly one of three tools:
-   - `recommend_remediation` — an immediate action (restart, rollback, scale,
-     revert a config). No code change, no PR.
-   - `propose_fix` — a structured PR (title, body, exact search/replace file
-     changes) for a genuine code-level bug that an immediate action can't fix.
-   - `no_action_needed` — the investigation found no actionable root cause
-     (e.g. transient, already resolved, or genuinely unclear).
-5. Depending on **action mode** (§ below), the agent either just records what
-   it would do, or actually posts to Slack / opens the PR.
-6. Regardless of outcome, one `InvestigationRecord` (§ below) is appended to
-   a JSON-lines file — the durable dataset behind "how well is this actually
-   working."
+1. **Trigger.** A new kagent Session of the Agent gets one message:
+   - the mediator's push: `Causely detected a problem...` with a
+     `Causely ID:` line and the notification JSON;
+   - a ScheduledRun execution: `[causely-sweep] ...`;
+   - or a person: `Investigate Causely issue <id>.`
+2. **Actor start.** Substrate restores an Actor from the Agent's golden
+   snapshot. The adapter fetches its configuration (model, prompt, MCP
+   servers) from the kagent control plane, reads the Harness env, writes
+   `/data/hermes/config.yaml` and `SOUL.md`, and starts `hermes acp`.
+   Credentials are not in the Actor; Substrate's egress gateway adds them to
+   requests to the model, the MCP servers and GitHub.
+3. **Pre-checks** (per issue; a sweep first lists issues with `get_issues`
+   and runs one ledger lookup for all of them): scope from the notification's
+   namespace label, then the ledger (`already_handled` if claimed or updated
+   within `CAUSELY_DEDUP_WINDOW`, or an open `causely/<id>-*` PR exists), then
+   `get_issue_details` (`no_action_needed` if no longer active). Then the agent
+   **claims** the issue with a ledger comment.
+4. **Investigation.** Hermes reads the issue through `mcp__causely__*`
+   tools, checks live state with kubectl, clones the repository with `gh` and
+   searches it with `rg`, and verifies the diagnosis before deciding anything
+   (see the prompt's verification rules). A sweep does this for up to
+   `CAUSELY_MAX_INVESTIGATIONS_PER_SWEEP` issues, most severe first.
+5. **Outcome**, recorded as a comment on the ledger issue.
+   - `no_action_needed`: verification shows the error is handled or the issue
+     has self-resolved.
+   - `already_handled`: the ledger or an open PR shows another run has it.
+   - `remediation`: give the command; run it only in act mode with
+     `CAUSELY_ALLOW_KUBE_MUTATIONS=true` and the per-namespace RBAC.
+   - `fix_pr`: in act mode push `causely/<issue>-<slug>` and open a PR; in
+     observe mode put the diff, title and body in the report.
+   - `out_of_scope` / `blocked`: the entity is outside the namespaces this
+     deployment owns, or Causely MCP (or another required tool) is missing.
+6. **Result.** The final message starts with an `OUTCOME:` block (a sweep:
+   one per issue plus `SWEEP_SUMMARY`). The full stream (text and every tool
+   call and result) is the Session's task history in kagent; the ledger
+   issue in GitHub carries the outcome too. If kagent's telemetry is on, the
+   turn is also one OpenTelemetry trace: a turn span carrying the turn's
+   token usage, with an `execute_tool` span per tool call (README,
+   "Tracing").
 
-### Action modes
+Follow-ups ("why did you rule out the database?") go to the same Session
+and resume the same Hermes session.
 
-| Mode | PR opened? | Slack posted? | Investigation runs? | When to use |
-|---|---|---|---|---|
-| `observe` (default) | No | No | Yes, in full | Evaluating a new config, or Causely's own root-cause quality, without side effects |
-| `act` | Yes | Yes | Yes, in full | Once you trust the configuration and want real remediation |
+## 3. Deploying
 
-Set via `action_mode` in `config.yaml`. There is no per-severity or
-per-namespace override today — it's one setting for the whole instance. In
-both modes the investigation itself (MCP calls, GitHub reads, Claude cost) is
-identical; only what happens with the result differs. This means `observe`
-mode still costs real Anthropic API spend — it is a dry run of the *actions*,
-not a free simulation of the whole pipeline.
+### Inputs checklist
 
-### Trigger sources — how they differ in configuration and output
+| # | Input | Where |
+|---|---|---|
+| 1 | Image pushed and pinned by digest | `harness.yaml` `workload.image` |
+| 2 | WorkerPool name and snapshot bucket | `harness.yaml` `substrate` |
+| 3 | Repository `owner/name` | `harness.yaml` `CAUSELY_GITHUB_REPO` |
+| 4 | Anthropic API key | Secret `causely-hermes-anthropic` |
+| 5 | Causely MCP URL and token | `model-and-tools.yaml`, Secret `causely-hermes-causely-mcp` |
+| 6 | GitHub token scoped to that repository (Issues write for the ledger) | Secret `causely-hermes-github` (`api-token`, `git-basic`) |
+| 7 | (optional) kubectl: not available for the in-cluster API server yet | secrets.md, "kubectl" |
+| 8 | (optional) namespaces this deployment owns | `harness.yaml` `CAUSELY_SCOPE_NAMESPACES` |
+| 9 | A kagent RPC token for the mediator user, and one for creating the ScheduledRun | mediator A2A destination; your `grpcurl` call |
 
-All three produce the same internal `TriggerPayload` (`main.go`) and feed the
-same investigation path and the same `InvestigationRecord`. They differ in
-where the data comes from and what metadata is available downstream:
-
-| Trigger | Enabled by | Issue data source | Slack thread info? | Notes |
-|---|---|---|---|---|
-| **Webhook** (`POST /trigger`) | Always on; requires `TRIGGER_SHARED_SECRET` (`loadConfig` refuses to start without it, unless `allow_unauthenticated_trigger: true`) | Causely mediator's existing `NotificationPayload` (`notification_payload.go`) — the same shape Slack/Teams destinations already get | No — mediator's generic-webhook delivery is separate from its Slack-specific delivery, so `SlackChannel`/`SlackThreadTS` are empty | Wiring this up is a **mediator config change, not a code change** — see §2 |
-| **Poll** | `poll.enabled: true` in `config.yaml` | Calls Causely MCP's `get_issues` tool directly on an interval | No (no mediator involved) | Tracks a per-Issue watermark (`poll.go`) so an unchanged, still-open issue isn't re-investigated every cycle; a severity shift, symptom-count change, or new occurrence does re-trigger |
-| **Slack `/slack/actions`** | Always on; requires `SLACK_SIGNING_SECRET` (`loadConfig` refuses to start without it, unless `allow_unauthenticated_slack_actions: true`) | The Slack "Fix it" button's `value` payload (round-tripped from whatever mediator put there) | Yes — this is the one path with real channel + thread, so `act`-mode replies thread correctly | Requires a Slack app configured to POST interactive payloads here |
-
-Practical implication: if you want `act`-mode Slack replies threaded to the
-original alert, use the Slack button path, not the webhook path.
-
-### Investigation records
-
-Every run — skipped (out of scope, budget exceeded), failed, or completed —
-appends one JSON line to `investigation_record_path` (`investigation_record.go`).
-Fields worth knowing:
-
-- **Identity**: `issue_id`, `entity_id`, `entity_name`, `diagnosis_name`, `severity`
-- **Provenance**: `trigger_source` (`webhook` | `poll` | `slack_action`), `action_mode`
-- **Cost**: `input_tokens`, `output_tokens`, `cost_usd`
-- **Shape**: `tool_calls` (server + tool name + error flag, per call), `tool_call_count`
-- **Outcome**: `verdict` (`skipped_scope` | `skipped_budget` | `skipped_stale` | `fix_proposed` | `remediation_recommended` | `no_action_needed` | `failed`), `skip_reason`, `summary`, `remediation`, `pr_url`, `error`, `causely_remediation_hint`, `proposed_fix`
-- **Human-filled later**: `correctness_label`, `correctness_notes` — the agent
-  never sets these; they exist so a human (or synthetic-bug ground truth) can
-  label a run after the fact and turn the JSONL file into an evaluation set.
-
-This is a plain append-only file, not a database — designed to be queried
-with `jq`/grep/a notebook, not a service.
-
-### Cost controls
-
-Two independent caps, both in `agent.go`/`cost.go`:
-
-- **Per-investigation** (`max_cost_usd`, default $5): checked every loop
-  iteration inside `runClaudeLoop`; exceeding it aborts the investigation
-  (partial findings are preserved in the record's `summary`).
-- **Weekly aggregate** (`max_weekly_cost_usd`, default $50): a rolling
-  7-day window (not calendar-week) across *all* investigations this process
-  runs, checked *before* starting a new investigation so a recurring root
-  cause can't blow the budget one under-cap incident at a time. Persisted to
-  `cost_state_file` if set, so a pod restart doesn't reset the counter.
-  This check-then-start isn't a reservation: a burst of near-simultaneous
-  triggers could all observe the cap as not-yet-reached before any of them
-  records spend. `max_concurrent_investigations` (default 5, in `cost.go:
-  weeklyBudget.withConcurrencyLimit`) bounds how many investigations can be
-  in that window at once, capping worst-case overshoot to roughly that many
-  investigations' worth rather than leaving it unbounded.
-
----
-
-## 2. End-to-end workflow — mediator, Claude, GitHub, Slack
-
-```
-Causely mediator                 causely-background-agent                  external services
-─────────────────                ─────────────────────────                  ─────────────────
-Issue detected
-  │
-  ├─ Slack/Teams notify  (existing, unrelated to this agent)
-  │
-  └─ "causelybot" webhook ──POST /trigger──▶ validTriggerAuth()
-       (Bearer TRIGGER_SHARED_SECRET)              │
-                                                    ▼
-                                          notification.toTriggerPayload()
-                                                    │
-                                                    ▼
-                                              go runAgent(...)
-                                                    │
-                              ┌─────────────────────┼─────────────────────────┐
-                              │ inScope()?           weekly.exceeded()?        │
-                              └─────────────────────┬─────────────────────────┘
-                                                     ▼
-                                          loadMCPSources(cfg)  ──tools/list──▶  Causely MCP server (+ extras, e.g. Grafana)
-                                                     │
-                                                     ▼
-                                          runClaudeLoop(...)
-                                            │
-                                            ├──POST /v1/messages──▶ Anthropic API (claude-sonnet-4-6)
-                                            │◀──tool_use blocks────┘
-                                            │
-                                            ├──tools/call──▶ Causely/extra MCP servers  (evidence gathering)
-                                            ├──GET contents/search──▶ GitHub API        (read_file, list_directory, search_code)
-                                            │
-                                            └──terminates on recommend_remediation, propose_fix, OR no_action_needed
-                                                     │
-                              ┌──────────────────────┴──────────────────────┐
-                              ▼ (observe mode: stop here, just record)       ▼ (act mode)
-                                                                   ┌─────────┴─────────┐
-                                                                   ▼                   ▼
-                                                        gh.CreatePR(...)      slack.PostToThread(...)
-                                                        ──POST /pulls──▶       ──POST chat.postMessage──▶
-                                                          GitHub (branch,        Slack
-                                                          commit, PR)
-                                                     │
-                                                     ▼
-                                          rec.record(InvestigationRecord)  ──append──▶  investigation_record_path (JSONL)
-```
-
-### Mediator → agent wiring
-
-This is purely a **mediator-side notification-config change** — no code
-change to mediator, and no code change to this agent. Point a
-`causelybot`-type notification destination at this service's `/trigger` URL.
-On mediator's deployment, that typically means environment variables such as:
-
-```
-NOTIFICATION_CAUSELY_AGENT_TYPE=causelybot
-NOTIFICATION_CAUSELY_AGENT_URL=http://causely-background-agent:8090/trigger
-NOTIFICATION_CAUSELY_AGENT_TOKEN=<same value as this agent's TRIGGER_SHARED_SECRET>
-```
-
-(Exact env var names live in mediator's own notification-destination config,
-not in this repo — confirm current names against mediator's deployed config
-before wiring, since this agent's repo doesn't own that contract.)
-
-### Claude interaction
-
-- One Claude conversation per investigation, capped at 20 tool-use
-  iterations (`agent.go: runClaudeLoop`), model `claude-sonnet-4-6`
-  (`cost.go: claudeModel`).
-- Tools presented to Claude = every MCP server's tools (prefixed
-  `<server-name>__`, e.g. `causely__get_issue_details`) + 6 built-ins:
-  `read_file`, `list_directory`, `search_code`, `propose_fix`,
-  `recommend_remediation`, `no_action_needed`.
-- The system prompt (`buildSystemPrompt`) explicitly biases Claude toward
-  `recommend_remediation` first, and only toward `propose_fix` (which costs a
-  PR, code changes, review overhead) when an immediate action can't resolve
-  the underlying issue. `no_action_needed` is the explicit escape hatch when
-  neither applies — no code change, no remediation, just a recorded verdict.
-- Model pricing is hardcoded in `cost.go: modelPricing` — needs periodic
-  manual re-verification against https://www.anthropic.com/pricing since
-  there's no dynamic pricing lookup.
-
-### GitHub interaction
-
-- Read: `GET /repos/{owner}/{repo}/contents/{path}` (files, directories),
-  `GET /search/code` scoped to the configured repo.
-- Write (`act` mode + `propose_fix` only): creates a branch named
-  `causely-fix/<sanitized-root-cause-id>-<unix-ts>`, applies each
-  `FileChange` as a single-string search/replace via the Contents API, opens
-  a PR against the repo's default branch.
-- Dedup: before creating a new PR, `findExistingFixPR` looks for an
-  already-open PR whose branch starts with `causely-fix/<root-cause-id>-` —
-  if found, new changes are pushed onto that branch instead of opening a
-  duplicate PR (a recurring issue fires this webhook multiple times
-  before it's actually resolved).
-- One GitHub token (`GITHUB_TOKEN`), one repo (`github_repo` in config) per
-  agent instance — this agent cannot fan out writes across multiple repos.
-  Multi-repo coverage means multiple deployed instances (see `inScope`
-  below).
-
-### Slack interaction
-
-- `act` mode only: `slackClient.PostToThread` (`slack.go`) posts via
-  `chat.postMessage`, as user "Causely Background Agent" with a wrench
-  emoji, threaded to `SlackThreadTS` when the trigger source provided one
-  (only the Slack-button trigger does today — see the table in §1).
-- `/slack/actions` verifies Slack's HMAC request signature
-  (`slack_actions.go: verifySlackSignature`) if `SLACK_SIGNING_SECRET` is
-  set, rejecting requests older than 5 minutes as a replay guard.
-
-### Scope enforcement (multi-instance safety)
-
-`scope.go: inScope` decides whether *this* deployed instance is allowed to
-act on a given issue, since mediator-side routing to the right instance
-is best-effort, not a guarantee:
-
-1. If the Issue's entity carries a `causely.ai/github-repo` label, it
-   must case-insensitively match this instance's configured `github_repo`.
-2. If `scope_namespaces` is configured (non-empty), the entity's
-   `causely.ai/namespace` label must be in that list.
-3. If neither signal is present/configured, the trigger is accepted by
-   default.
-
-This is how you run several `causely-background-agent` deployments — one per
-repo/team — safely pointed at the same Causely tenant.
-
----
-
-## 3. Deploying to a Causely-installed cluster
-
-There is currently **no automated installer** — deployment is plain
-Kubernetes manifests (`deploy/deployment.yaml`, `deploy/configmap.example.yaml`),
-no Helm chart, no operator. An agent (human or AI) doing this deploy needs
-exactly the following inputs; everything else below is mechanical.
-
-### Required inputs (the "xxx, yyy, zz" checklist)
-
-| # | Value | Where it's used | Secret or config? |
-|---|---|---|---|
-| 1 | `ANTHROPIC_API_KEY` | Claude API calls | **Secret**, required |
-| 2 | `GITHUB_TOKEN` | GitHub read + PR creation (needs `repo` scope, and `read:org`/code-search access, on the target repo) | **Secret**, required |
-| 3 | `SLACK_BOT_TOKEN` | Posting replies (`act` mode); a valid token is still required to construct the client even in `observe` mode | **Secret**, required |
-| 4 | `github_repo` (`org/repo`) | The one repo this instance reads/writes | Config, required |
-| 5 | `causely_mcp_url` | This tenant's Causely MCP endpoint (hosted: `https://api.causely.app/mcp`; self-run: in-cluster address) | Config, defaults to a placeholder localhost URL — **not enforced**, override it for anything real |
-| 6a | `CAUSELY_MCP_TOKEN` | Bearer-token auth to the Causely MCP server, on a tenant with auth disabled or expecting a static bearer token | Secret, optional |
-| 6b | `CAUSELY_MCP_CLIENT_ID` + `CAUSELY_MCP_CLIENT_SECRET` | HTTP Basic auth to the Causely MCP server instead of 6a — for a tenant with Frontegg auth enabled (e.g. staging). The server exchanges/caches a Frontegg access token itself, so this pair is static and never needs refreshing. Set both or neither; takes precedence over `CAUSELY_MCP_TOKEN` if both are set. | Secret, optional (required if the tenant's MCP endpoint has `authentication.disabled: false` — check the tenant's `api` ConfigMap, `services.MCP.config.authentication`) |
-| 7 | `TRIGGER_SHARED_SECRET` | Bearer-auth for `POST /trigger` | Secret, **required** — `loadConfig` refuses to start without it unless `allow_unauthenticated_trigger: true` is set in `config.yaml` (local/demo use only) |
-| 8 | `SLACK_SIGNING_SECRET` | Verifies `/slack/actions` payloads are really from Slack | Secret, **required** — `loadConfig` refuses to start without it unless `allow_unauthenticated_slack_actions: true` is set in `config.yaml` (local/demo use only) |
-| 9 | `action_mode` | `observe` or `act` | Config, defaults to `observe` — deploy in `observe` first |
-| 10 | `scope_namespaces` / `causely.ai/github-repo` label | Which entities this instance is allowed to act on, if running more than one instance | Config, optional |
-| 11 | `deploy/rbac.yaml` applied, mutate RoleBinding namespace matching `scope_namespaces` | Grants `kubectl_get`/`kubectl_logs` **cluster-wide** (diagnosis shouldn't be namespace-blind — an Issue's dependency is often outside its own namespace); `kubectl_get_secret_keys` requires a separate `deploy/rbac-secrets.example.yaml` (opt-in, namespace-scoped); `kubectl_rollout_restart`/`kubectl_scale` require BOTH `action_mode: act` AND `allow_kubernetes_mutations: true` in config.yaml, scoped per-namespace (mutation stays narrow even though reads are broad). Each tool is only offered when `SelfSubjectAccessReview` confirms it's actually granted, not merely that in-cluster credentials exist. | Optional — omitting it just omits these tools, no startup failure |
-| 12 | `deploy/pvc.yaml` applied, before `deployment.yaml` | Backs `/data` (investigation records, weekly cost state, poll watermark) with real storage so it survives pod recreation, not just a container restart — `deployment.yaml` references it by claim name | **Required** — `deployment.yaml` won't schedule without a matching PVC; no cluster default StorageClass (e.g. a bare `kind` cluster) means installing one first |
-
-### Step-by-step
+### Steps
 
 ```bash
-# 0. Build & push the image (skip if using a pre-built one)
-docker build -t docker.io/causelyai/causely-background-agent:latest .
-docker push docker.io/causelyai/causely-background-agent:latest
+# 0. Image
+make push IMAGE=<registry>/causely-hermes-harness TAG=0.1.0
+#    (linux/amd64 + linux/arm64); then set harness.yaml workload.image to
+#    <registry>/causely-hermes-harness@sha256:<digest of the image index>
 
-# 1. Create the Secret out-of-band — never commit these values.
-kubectl create secret generic causely-background-agent \
-  --from-literal=anthropic-api-key="$ANTHROPIC_API_KEY" \
-  --from-literal=github-token="$GITHUB_TOKEN" \
-  --from-literal=slack-bot-token="$SLACK_BOT_TOKEN" \
-  --from-literal=slack-signing-secret="$SLACK_SIGNING_SECRET" \
-  --from-literal=causely-mcp-token="$CAUSELY_MCP_TOKEN" \
-  --from-literal=causely-mcp-client-id="$CAUSELY_MCP_CLIENT_ID" \
-  --from-literal=causely-mcp-client-secret="$CAUSELY_MCP_CLIENT_SECRET" \
-  --from-literal=trigger-shared-secret="$(openssl rand -hex 32)"
-#   Use causely-mcp-token OR the causely-mcp-client-id/-secret pair, whichever
-#   the tenant's Causely MCP endpoint expects (see row 6a/6b above) — leave
-#   the other one's --from-literal value empty rather than omitting the flag.
+# 1. Secrets: see deploy/kagent/secrets.md (exact commands and token scopes)
 
-# 2. Copy deploy/configmap.example.yaml, fill in causely_mcp_url and
-#    github_repo (and any other fields you want to change from defaults),
-#    then apply it. It is NOT applied automatically by deployment.yaml.
-cp deploy/configmap.example.yaml deploy/configmap.yaml
-#   ... edit deploy/configmap.yaml ...
-kubectl apply -f deploy/configmap.yaml
+# 2. kagent resources (Harness, AgentTemplate + Agent, ModelConfig,
+#    RemoteMCPServer, EgressPolicy)
+FILES="-f deploy/kagent/model-and-tools.yaml -f deploy/kagent/agenttemplate.yaml -f deploy/kagent/harness.yaml -f deploy/kagent/egress.yaml"
+kubectl apply --dry-run=server $FILES && kubectl apply $FILES
 
-# 3. Apply the PVC for /data (investigation records, weekly cost state, poll
-#    watermark) — must exist before deployment.yaml, which references it by
-#    claim name. Required, not optional: without it the pod won't schedule.
-kubectl apply -f deploy/pvc.yaml
+# 3. Wait for the Agent's golden snapshot (Substrate pulls the image and
+#    starts the adapter once)
+kubectl -n kagent wait agent/causely-investigator --for=condition=Ready --timeout=10m
 
-# 4. Apply RBAC (ServiceAccount + ClusterRole + a RoleBinding per target
-#    namespace) so the kubectl_* tools are available — edit the RoleBinding's
-#    namespace to match scope_namespaces first. Optional: skipping this just
-#    means kubectl tools are omitted, not a startup failure.
-kubectl apply -f deploy/rbac.yaml
+# 4. Run one investigation in observe mode against a real issue
+#    (the kagent CLI talks to localhost:8083: port-forward svc/kagent-controller)
+SESSION=$(kagent agent session create --agent causely-investigator -o json | jq -r .session.id)
+kagent agent invoke --session "$SESSION" -S --task "Investigate Causely issue $ISSUE_ID."
+#    check the ledger issue it created in CAUSELY_GITHUB_REPO; run the same
+#    command again and expect OUTCOME: already_handled
 
-# 5. Apply the Deployment + Service.
-kubectl apply -f deploy/deployment.yaml
-
-# 6. Verify it's healthy.
-kubectl rollout status deployment/causely-background-agent
-kubectl port-forward svc/causely-background-agent 8090:8090
-curl -f http://localhost:8090/healthz
-
-# 7. Wire mediator to this instance's /trigger (see §2's "Mediator → agent
-#    wiring") using the SAME value for the token as trigger-shared-secret
-#    above. This is a mediator notification-config change, done separately
-#    from this repo/deploy.
-
-# 8. Confirm end-to-end in observe mode: trigger a real or synthetic root
-#    cause, then check the pod logs and investigation_record_path (exec into
-#    the pod) for a completed InvestigationRecord before ever flipping
-#    action_mode to "act".
-
-# 9. Once trusted: edit deploy/configmap.yaml, set action_mode: "act",
-#    kubectl apply -f deploy/configmap.yaml, then roll the deployment
-#    (kubectl rollout restart deployment/causely-background-agent) since
-#    ConfigMap changes aren't hot-reloaded.
+# 5. Turn on the triggers (deploy/kagent/triggering.md)
+#    - mediator: add the A2A notification destination (ProblemDetected, High/Critical)
+#    - sweep: grpcurl ... CreateScheduledRun < deploy/kagent/scheduled-sweep.json
 ```
 
-### Multi-repo / multi-team deployment
+If the Agent's `Ready` condition reports a failed golden build, its message
+says why (for example the image could not be pulled: Substrate pulls images
+itself, so the registry must be reachable from its `atelet` pods, not just
+from the nodes). If the adapter fails, it logs one line saying why: an
+unsupported model type, an invalid `CAUSELY_ACTION_MODE`, or a configuration
+kagent's contract rejects. To reproduce outside the cluster, run the image
+with `--check` (README, "Build and test").
 
-Each `causely-background-agent` instance handles exactly one `github_repo`.
-To cover multiple repos against the same Causely tenant, deploy multiple
-instances (distinct `metadata.name`/Service, distinct ConfigMap/Secret,
-distinct `github_repo` + `scope_namespaces`), each pointed at the same
-`causely_mcp_url`. `inScope()` (§2) is what keeps them from stepping on each
-other if mediator's routing is imperfect.
+### Wiring triggers
 
-### Persistence caveats (read before relying on `act` mode long-term)
+See [deploy/kagent/triggering.md](../deploy/kagent/triggering.md). Two
+triggers feed the same Agent:
 
-- `/data` is a PVC (`deploy/pvc.yaml`, `ReadWriteOnce`, 1Gi default) — apply
-  it before `deployment.yaml`, which references it by claim name. This is
-  what makes `investigation_record_path`, `cost_state_file` (weekly budget),
-  and `poll.state_file` (poll watermark) survive pod recreation, not just a
-  container restart within the same pod — confirmed live, a routine
-  `kubectl rollout restart` on an `emptyDir`-backed deployment wiped the
-  entire investigation-record history each time.
-- `deployment.yaml` uses `strategy: Recreate` and `replicas: 1` deliberately
-  — this agent isn't safe to run as multiple replicas racing on the same
-  `/data` volume.
-- Extra MCP server tokens configured via `mcp_servers` in `config.yaml` land
-  in the **ConfigMap**, not a Secret — acceptable for an unauthenticated
-  extra server (e.g. an open Grafana MCP endpoint), not for one that needs a
-  real credential. Don't put a sensitive extra-MCP token in `config.yaml`
-  today; that gap isn't closed yet.
+- **Mediator push** (real-time): the Causely mediator's `A2A` notification
+  destination sends each notification to a new Session. Filter severity
+  there; the old service's `allowed_severities` default of High/Critical is
+  a good starting point. The mediator's destination still targets pre-1.0
+  kagent; see triggering.md.
+- **Scheduled sweep** (catch-up, replaces poll mode): a kagent ScheduledRun
+  every 30 minutes looks for active High/Critical issues nobody has handled,
+  including ones whose push was missed or filtered.
+
+They are safe to run together: the ledger makes whichever run gets there
+first own the issue for `CAUSELY_DEDUP_WINDOW`.
+
+## 4. From observe to act
+
+Run in observe mode until the reports are consistently right. Then, one step
+at a time:
+
+1. **PRs.** Give the GitHub token Contents write and Pull requests write,
+   protect the default branch, and set `CAUSELY_ACTION_MODE=act`. Re-apply the
+   Harness; new Sessions get the new policy once the Agent's new revision is
+   Ready (existing Sessions keep the revision they started with).
+2. **Restarts and scaling** (optional). Apply `rbac-mutate.example.yaml` once
+   per namespace in `CAUSELY_SCOPE_NAMESPACES`, then set
+   `CAUSELY_ALLOW_KUBE_MUTATIONS=true`. All three (act mode, the flag, the
+   RoleBinding) must agree.
+
+Rolling back is the reverse: set `CAUSELY_ACTION_MODE=observe` (or drop the
+token's write scopes) and the agent can no longer push.
+
+## 5. Cost
+
+Every investigation spends real model tokens, in observe mode too. Bounds:
+
+- `CAUSELY_MAX_TURN_DURATION` (default `20m`) cancels a single-issue turn
+  that runs too long, `CAUSELY_MAX_SWEEP_DURATION` (default `60m`) a sweep;
+  Hermes also stops after 90 model iterations per turn (which a sweep of
+  several issues shares).
+- The ledger, scope and staleness pre-checks end duplicates and resolved
+  issues within a few model turns.
+- Sweep cost is bounded by the schedule times
+  `CAUSELY_MAX_INVESTIGATIONS_PER_SWEEP`; a quiet sweep (nothing new) costs
+  one `get_issues` call and one ledger lookup.
+- With telemetry on, `gen_ai.usage.*` on the turn spans (and kagent's GenAI
+  token metrics) gives tokens per turn, and so per issue (a sweep turn covers several issues);
+  that is the place to build spend dashboards.
+- There is no dollar cap and no weekly cap any more. Put a spend limit on the
+  Anthropic workspace the API key belongs to, and filter by severity on the
+  mediator destination and in the sweep prompt.
+- Sending only the issue ID keeps the prompt small; the agent fetches what it
+  needs.
+
+## 6. Several repositories or teams
+
+One Harness carries one repository and one policy. For several repositories,
+create one Harness per repository (distinct name, `CAUSELY_GITHUB_REPO`,
+`CAUSELY_SCOPE_NAMESPACES`), one GitHub Secret and EgressPolicy per token,
+and one Agent per Harness, all using the same AgentTemplate and Causely
+RemoteMCPServer. Route with one ScheduledRun (and mediator destination) per
+Agent; `CAUSELY_SCOPE_NAMESPACES` makes each deployment
+drop other teams' issues as `out_of_scope` before any tool call, and keeps its
+sweeps to its own namespaces. Each repository gets its own ledger.
+
+## 7. State and persistence
+
+- `/data` (Hermes home and sessions, the workspace `/data/work` with the
+  cloned repository, the adapter's continuation store) is in the Actor and
+  covered by the Substrate snapshot policy. Nothing secret is written there;
+  the Actor holds no secrets at all.
+- Nothing carries over between Sessions. The only cross-run state is the
+  ledger in GitHub; the full investigation record is the Session history in
+  kagent. There is no separate JSONL file to back up.
+- To force a re-investigation inside the dedup window, send a manual message
+  containing `force`, or wait out `CAUSELY_DEDUP_WINDOW`. Closing the ledger issue does not reset it (the
+  window keys on its last update).
+
+## 8. Changing behavior
+
+- **Investigation method:** edit the ConfigMap in `agenttemplate.yaml`. Keep
+  the verification rules; they are what stops the agent restating Causely's
+  diagnosis.
+- **Command recipes or report format:** edit
+  `skills/causely-investigation/SKILL.md` and rebuild the image.
+- **What the agent may do:** Harness env, token scopes and RBAC. Never the
+  prompt.
+- **More data sources:** add a RemoteMCPServer and a `tools` entry on the
+  AgentTemplate.

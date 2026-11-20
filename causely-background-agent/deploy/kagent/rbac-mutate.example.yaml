@@ -1,0 +1,37 @@
+# OPT-IN: lets the investigator run `kubectl rollout restart` and
+# `kubectl scale` in ONE namespace. Kept out of rbac.yaml so that applying the
+# default manifests can never grant writes by accident.
+#
+# Takes effect only when all three agree:
+#   1. this RoleBinding exists for the target namespace,
+#   2. the Harness sets CAUSELY_ACTION_MODE=act, and
+#   3. the Harness sets CAUSELY_ALLOW_KUBE_MUTATIONS=true.
+# (2) and (3) only change Hermes deny rules and the prompt; this RBAC is the
+# boundary that holds even if the model routes around a deny rule.
+#
+# Copy the RoleBinding once per namespace listed in CAUSELY_SCOPE_NAMESPACES.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: causely-investigator-mutate
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["patch"] # rollout restart
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale", "replicasets/scale"]
+    verbs: ["get", "patch", "update"] # scale
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: causely-investigator-mutate
+  namespace: your-app-namespace # one RoleBinding per namespace in scope
+subjects:
+  - kind: ServiceAccount
+    name: causely-investigator
+    namespace: causely-investigator
+roleRef:
+  kind: ClusterRole
+  name: causely-investigator-mutate
+  apiGroup: rbac.authorization.k8s.io

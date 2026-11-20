@@ -1,385 +1,471 @@
-# causely-background-agent
+# causely-background-agent (Hermes on kagent)
 
-A standalone reference agent that investigates issues using
-[Causely](https://causely.ai)'s MCP tools plus GitHub read/write access, and
-either opens a PR with a code-level fix or recommends an immediate
-remediation (restart, rollback, scale, revert a config).
+A reference agent that investigates [Causely](https://causely.ai) issues with
+Causely's MCP tools, the source repository and live cluster state, then ends
+in one of three outcomes: a **fix PR**, an **immediate remediation** (restart,
+rollback, scale, config revert), or **no action needed**.
 
-This is a **reference implementation**, not a required part of using Causely
-— Causely's product surface is its MCP server; this repo shows one way to
-build an agent on top of it. Bring your own agent if you'd rather build
-something different against the same MCP tools.
+This version has no service of its own. The agent is
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) running as a
+[kagent](https://kagent.dev) **BYO Harness** on Agent Substrate. The
+investigation method lives in an AgentTemplate system prompt and a Hermes
+skill; deployment policy (observe or act, cluster writes, which repository)
+lives on the Harness. The only code here is a small Go adapter that turns
+kagent's configuration into Hermes configuration and bridges A2A to Hermes'
+ACP interface. It follows the
+[kagent-oss-hermes](https://github.com/AdminTurnedDevOps/agentic-demo-repo/tree/main/substrate/kagent-substrate/kagent-oss-hermes)
+reference.
 
-## What it does
+This is a reference implementation, not a required part of using Causely:
+Causely's product surface is its MCP server.
+
+> Replaces the earlier standalone Go service (webhook, poll and Slack
+> triggers with a hand-written Claude tool loop). See
+> [What changed from the Go service](#what-changed-from-the-go-service) for
+> what that dropped and what replaces it.
+
+## How it works
 
 ```
-Causely Issue        →  causely-background-agent  →  Claude tool-use loop
-  (webhook push,          /trigger         │
-   or polled directly)  /slack/actions     ├─ Causely MCP tools (Issue,
-                                            │  logs, topology, evidence)
-                                            ├─ any additional MCP servers you
-                                            │  configure (Prometheus, Grafana,
-                                            │  your own internal tools, ...)
-                                            ├─ GitHub read/write tools
-                                            ├─ kubectl (if RBAC is granted)
-                                            └─ recommend_remediation,
-                                               propose_fix → GitHub PR, or
-                                               no_action_needed
+Causely mediator ─ A2A push ──┐  "Causely ID: <id>" + notification JSON
+kagent ScheduledRun ──────────┤  "[causely-sweep] ..." every 30 min
+kagent agent invoke / A2A ────┘  "Investigate Causely issue <id>"
+        ▼
+ kagent Agent causely-investigator ── Session ── Substrate Actor (this image)
+                              │        (egress gateway adds model, MCP and
+                              │         GitHub credentials to outgoing calls)
+                              ├─ causely-hermes (Go): A2A server ⇄ ACP client
+                              │     writes $HERMES_HOME/config.yaml + SOUL.md
+                              │     from kagent's bootstrap config + Harness env
+                              │
+                              └─ hermes acp (Python)
+                                    ├─ model: Anthropic (or OpenAI) ModelConfig
+                                    ├─ MCP: Causely (+ any other RemoteMCPServer)
+                                    ├─ terminal: git, gh, kubectl, rg
+                                    ├─ skill: causely-investigation
+                                    ├─ approvals.deny: policy enforcement
+                                    └─ ledger: GitHub issues labeled
+                                       causely-investigation (dedup across runs)
+                                          │
+                                          ▼
+     per issue: OUTCOME: fix_pr | remediation | no_action_needed
+                       | already_handled | out_of_scope | blocked
+     (a sweep adds a SWEEP_SUMMARY block)
 ```
 
-Causely and GitHub are the only two sources built in; every other tool here
-is optional and additive. See
-[Extending with other observability sources](#extending-with-other-observability-sources-prometheus-grafana-etc)
-below for how to add more MCP servers, and [kubectl access](#kubectl-access)
-for the live-cluster tools.
+Every trigger gets its own kagent Session, Actor, Hermes session and
+workspace, so runs share nothing on disk; the ledger is the shared state.
+Follow-up messages to the same Session resume the same Hermes session.
+See [triggering.md](deploy/kagent/triggering.md) for configuring each
+trigger.
+
+## Repository layout
+
+```
+causely-background-agent/
+├── main.go              # startup: policy, credentials, config, A2A app
+├── runner.go            # starts `hermes acp`, one session per Actor, per-turn time limit
+├── client.go            # ACP client: streams Hermes text/tool events to kagent, rejects permission prompts
+├── config.go            # kagent ADKConfig -> Hermes config.yaml (model, mcp_servers, approvals, skills)
+├── soul.go              # SOUL.md = AgentTemplate prompt + generated deployment-policy section
+├── policy.go            # Harness env -> policy, and policy -> Hermes approvals.deny globs
+├── env.go               # keeps credentials and kagent's own variables out of Hermes' tool environment
+├── tracing.go           # kagent telemetry init, per-turn token usage, tool naming for kagent's spans
+├── *_test.go
+├── gh-wrapper.sh        # /usr/local/bin/gh: supplies the GitHub token from a file
+├── skills/causely-investigation/SKILL.md   # command recipes + report format
+├── Dockerfile, Makefile  # image pins Hermes by version + sha256 (HERMES_VERSION, HERMES_SHA256)
+├── deploy/kagent/
+│   ├── harness.yaml             # Harness: image + policy env (literal values only)
+│   ├── agenttemplate.yaml       # ConfigMap (system prompt) + AgentTemplate (Causely tool allowlist) + Agent
+│   ├── model-and-tools.yaml     # Anthropic ModelConfig + Causely RemoteMCPServer
+│   ├── egress.yaml              # EgressPolicy: GitHub access, token injected by the egress gateway
+│   ├── rbac.yaml                # read-only ServiceAccount for kubectl (no Secrets)
+│   ├── rbac-mutate.example.yaml # opt-in restart/scale, per namespace
+│   ├── secrets.md               # which Secrets, how each is kept from the model
+│   ├── scheduled-sweep.json     # kagent CreateScheduledRunRequest for the sweep (targets the Agent)
+│   └── triggering.md            # mediator A2A push, scheduled sweep, manual, Slack
+└── docs/AGENT_GUIDE.md  # operator walkthrough
+```
 
 ## Quick start
 
-Any customer with a Kubernetes cluster and Causely reachable from it can
-deploy this — nothing here is specific to any one tenant or environment.
-
-**Prerequisites:**
-- A Kubernetes cluster (this agent's infrastructure, can be separate from where the Causely mediator runs)
-- Causely reachable from that cluster, either Causely's hosted MCP endpoint
-  (`https://api.causely.app/mcp`) or an in-cluster address
-- An [Anthropic API key](https://console.anthropic.com/)
-- A GitHub token (read + PR-write) for the one repo this instance should
-  investigate and fix
-- A Slack bot token and signing secret (both required to start even in
-  `observe` mode; the token is never actually used to post unless you switch
-  to `act` mode)
-- `kubectl` access to the cluster you're deploying into
+Prerequisites: a cluster with kagent 1.0.1 and Agent Substrate 1.0 installed
+(a `WorkerPool` named `kagent-default`, a snapshot bucket), the `kagent` CLI,
+an Anthropic API key, a Causely MCP token, and a GitHub token for the one
+repository this deployment investigates.
 
 ```bash
-# 1. Use the published image, or build your own from this repo
-docker pull docker.io/causelyai/causely-background-agent:latest
+# 1. Build and push the image (linux/amd64 + linux/arm64), then pin the
+#    image index digest in deploy/kagent/harness.yaml
+make push IMAGE=<your-registry>/causely-hermes-harness TAG=0.1.0
 
-# 2. Create the Secret out-of-band — never commit these values
-kubectl create secret generic causely-background-agent \
-  --from-literal=anthropic-api-key="$ANTHROPIC_API_KEY" \
-  --from-literal=github-token="$GITHUB_TOKEN" \
-  --from-literal=slack-bot-token="$SLACK_BOT_TOKEN" \
-  --from-literal=slack-signing-secret="$SLACK_SIGNING_SECRET" \
-  --from-literal=trigger-shared-secret="$(openssl rand -hex 32)"
-# trigger-shared-secret and slack-signing-secret are required — the agent
-# refuses to start without them (see Securing /trigger below).
+# 2. Secrets (details and token scopes: deploy/kagent/secrets.md). None of
+#    them is handed to the Actor: the egress gateway adds them to requests.
+kubectl -n kagent create secret generic causely-hermes-anthropic --from-literal=api-key="$ANTHROPIC_API_KEY"
+kubectl -n kagent create secret generic causely-hermes-causely-mcp --from-literal=authorization="Bearer $CAUSELY_MCP_TOKEN"
+kubectl -n kagent create secret generic causely-hermes-github \
+  --from-literal=api-token="$GITHUB_TOKEN" \
+  --from-literal=git-basic="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64)"
 
-# 3. Copy deploy/configmap.example.yaml, set causely_mcp_url and github_repo
-#    at minimum, then apply it
-cp deploy/configmap.example.yaml deploy/configmap.yaml
-kubectl apply -f deploy/configmap.yaml
+# 3. Edit harness.yaml (image digest, CAUSELY_GITHUB_REPO, snapshot bucket), then apply
+FILES="-f deploy/kagent/model-and-tools.yaml -f deploy/kagent/agenttemplate.yaml -f deploy/kagent/harness.yaml -f deploy/kagent/egress.yaml"
+kubectl apply --dry-run=server $FILES && kubectl apply $FILES
+kubectl -n kagent wait agent/causely-investigator --for=condition=Ready --timeout=10m
 
-# 4. Apply the PVC — required; deployment.yaml won't schedule without it
-kubectl apply -f deploy/pvc.yaml
+# 4. Investigate one issue by hand
+SESSION=$(kagent agent session create --agent causely-investigator -o json | jq -r .session.id)
+kagent agent invoke --session "$SESSION" -S --task "Investigate Causely issue $ISSUE_ID."
 
-# 5. Apply RBAC — optional, only needed for the kubectl_* tools. Edit the
-#    namespace placeholders in the file first (see its comments)
-kubectl apply -f deploy/rbac.yaml
-
-# 6. Apply the Deployment + Service
-kubectl apply -f deploy/deployment.yaml
-
-# 7. Verify
-kubectl rollout status deployment/causely-background-agent
-kubectl port-forward svc/causely-background-agent 8090:8090
-curl -f http://localhost:8090/healthz
+# 5. Wire the triggers (deploy/kagent/triggering.md):
+#    - mediator: an A2A notification destination pointing at kagent
+#    - sweep: grpcurl ... ScheduledRunService/CreateScheduledRun < deploy/kagent/scheduled-sweep.json
 ```
 
-It starts in `observe` mode by default: it investigates and records what it
-finds, but never opens a real PR or posts to Slack, until you deliberately
-set `action_mode: "act"` in the ConfigMap. See `docs/AGENT_GUIDE.md` for the
-full walkthrough — mediator webhook wiring, cost controls, multi-instance
-scoping, and everything else below in more depth.
+It starts in **observe** mode: it investigates fully and reports the fix or
+remediation it would apply, but cannot push, open PRs or change the cluster.
+Set `CAUSELY_ACTION_MODE=act` on the Harness once you trust it. See
+[docs/AGENT_GUIDE.md](docs/AGENT_GUIDE.md) for the full walkthrough and
+[deploy/kagent/triggering.md](deploy/kagent/triggering.md) for wiring
+triggers.
 
-## Trigger sources
+## Investigation behavior
 
-- **Push webhook** (`POST /trigger`) — Causely's mediator POSTs its real,
-  already-existing notification payload (see `notification_payload.go`) after
-  detecting an Issue; this is the same payload Slack/Teams destinations
-  already receive, not a bespoke schema. Wiring this up is a **mediator
-  notification-config change, not a code change**: point a `causelybot`-type
-  destination at this agent's `/trigger` URL with a Bearer token matching
-  `TRIGGER_SHARED_SECRET` — e.g. via env vars on the mediator deployment:
-  `NOTIFICATION_CAUSELY_AGENT_TYPE=causelybot`,
-  `NOTIFICATION_CAUSELY_AGENT_URL=http://<this-service>:8090/trigger`,
-  `NOTIFICATION_CAUSELY_AGENT_TOKEN=<same as TRIGGER_SHARED_SECRET>`.
-  Reflects the Issue's state at the moment it fired. Note: this delivery
-  path doesn't carry Slack channel/thread info (that only exists after
-  mediator's separate Slack-specific delivery), so a reply in `act` mode can't
-  be threaded to the original alert via this trigger source.
-- **Poll** (`poll.enabled: true` in config) — on an interval, asks Causely's
-  MCP server for open issues directly (`get_issues`), instead of waiting for
-  a one-time webhook. Tracks a watermark per issue so an unchanged, still-open
-  issue isn't re-investigated every cycle, but a real change (severity shift,
-  symptom count growth) or new occurrence triggers again. Useful because a
-  webhook can't reflect how an Issue evolves after it fires.
-- **Slack `/slack/actions`** — a human clicking "Fix it" on a Causely Slack
-  alert.
+The system prompt ([agenttemplate.yaml](deploy/kagent/agenttemplate.yaml)) is
+a port of the old service's `buildSystemPrompt`, unchanged in substance:
 
-All three feed the same investigation path and the same
-`InvestigationRecord`.
+- **Don't adopt Causely's own remediation hint.** It is LLM-generated from
+  limited evidence; the agent must verify the symptom against live config,
+  the source and other observability data and derive its own fix.
+- **Verify before concluding.** Find the exact source of a logged error and
+  check whether it is already caught and handled; compare live state to what
+  a fix would set before proposing one; never claim what a Secret contains;
+  cite a real call site, not code that merely pattern-matches a name.
+- **Outcomes, in order of preference:** `no_action_needed` when verification
+  shows nothing is wrong (a first-class result, not a failure), then
+  `remediation` when an immediate action fixes it, and only then `fix_pr` for
+  a genuine code bug. Plus `already_handled` (ledger), `out_of_scope` (entity
+  outside `CAUSELY_SCOPE_NAMESPACES`) and `blocked` (Causely MCP or another
+  required tool unavailable).
 
-## Action modes
+New since the port, the same instructions serve two request shapes:
 
-- **`observe`** (default) — runs the full investigation and records what it
-  found and what it would have done, but never opens a real PR or posts to
-  Slack. Use this to evaluate a configuration or Causely's own diagnosis
-  quality without side effects.
-- **`act`** — does it for real.
+- **Single issue** (mediator push, or a person): recognised by a
+  `Causely ID: <id>` line, the notification JSON block, or
+  `Investigate Causely issue <id>`.
+- **Sweep** (ScheduledRun): starts with `[causely-sweep]`. The agent lists
+  active issues with `get_issues`, drops handled and out-of-scope ones, and
+  investigates the most severe up to `CAUSELY_MAX_INVESTIGATIONS_PER_SWEEP`.
 
-## Cost
+Either way each issue goes through the same procedure, cheapest checks first,
+which is where the old service's pre-filters now live:
 
-**Every investigation costs real money, in every mode — including
-`observe`.** `observe` only gates the *side effects* (opening a PR, posting
-to Slack); the Claude tool-use loop itself always runs for real and always
-spends real Anthropic API tokens. There is no free "dry run" of the
-investigation itself.
+1. **Scope** from the notification's `causely.ai/namespace` label, before any
+   tool call.
+2. **Ledger**: skip as `already_handled` if the issue's GitHub ledger issue
+   was claimed or updated within `CAUSELY_DEDUP_WINDOW` (24h), or an open
+   `causely/<id>-*` PR exists.
+3. **Staleness**: `get_issue_details`; if no longer active,
+   `no_action_needed` without a deep investigation.
+4. **Claim** in the ledger, investigate, finish, **record** the outcome as a
+   ledger comment.
 
-Two independent caps exist (`config.yaml`, see `cost.go`):
-- `max_cost_usd` (default `5`) — aborts a single investigation if it exceeds
-  this. Partial findings up to that point are still recorded.
-- `max_weekly_cost_usd` (default `50`) — a rolling 7-day cap across *all*
-  investigations this instance runs; once hit, new investigations are
-  skipped entirely (recorded with verdict `skipped_budget`) until spend ages
-  out of the window. Persisted to `cost_state_file` if set, so a restart
-  doesn't reset the counter. This check happens *before* an investigation
-  starts, not as an atomic reservation, so `max_concurrent_investigations`
-  (default `5`) bounds how many investigations can be in flight at once —
-  without it, a burst of near-simultaneous triggers could all pass the check
-  before any of them records spend, overshooting the weekly cap by more than
-  one investigation's worth.
+The [`causely-investigation` skill](skills/causely-investigation/SKILL.md)
+holds the mechanics: ledger commands, sweep procedure, clone and search the
+repo locally, kubectl recipes, the branch/commit/PR steps, the no-op-fix
+check, and the report format. Every issue's report starts with a parseable
+block; a sweep repeats it per issue and adds a `SWEEP_SUMMARY` /
+`NOT_REACHED` block:
 
-In our own testing, a single investigation typically cost in the
-**$0.4–$3.5** range, varying with how much digging Claude needed to do
-(a quick config check vs. tracing a bug through source across several
-files) — treat this as a rough sense of scale, not a guarantee; it depends
-on your repo's size, how deep an investigation goes, and Anthropic's current
-pricing (`cost.go`'s pricing table is a hardcoded snapshot that needs
-periodic manual updating against
-[Anthropic's published pricing](https://www.anthropic.com/pricing) — it will
-silently drift stale otherwise).
-
-The biggest cost lever if you enable `poll` mode is `allowed_severities` —
-poll runs continuously and pays for every genuinely new occurrence it acts
-on, so it **defaults to `["High", "Critical"]`** even if you never set it
-(see [Configuration](#configuration) below). Scoping `scope_namespaces` and
-keeping `poll.interval` reasonable (default `5m`) are the other two main
-levers. For the webhook trigger, the equivalent lever is on Causely's
-mediator side: configure its notification destination to only push
-High/Critical-severity Issues to this agent in the first place, rather
-than relying on this agent to filter after the fact.
-
-## Model
-
-The Claude model is **currently hardcoded** (`claudeModel` in `cost.go`) —
-there is no config field or environment variable to choose a different
-model today. Model selection (and the accompanying per-model pricing table
-`cost.go` uses for cost tracking) is planned to become configurable in a
-future version. If you need a different model right now, that requires a
-source change.
-
-## kubectl access
-
-If `deploy/rbac.yaml` is applied, the agent gets `kubectl_get` and
-`kubectl_logs` — direct, live cluster state that's more authoritative than any
-cached/indexed view (including Causely's own `get_config` MCP tool), since it
-reflects the cluster at the moment of the call. These read tools are granted
-**cluster-wide**, deliberately: a root cause's actual dependency is often
-outside the namespace of the service it's degrading (e.g. an app in `causely`
-failing because of something in `monitoring`), and diagnosis shouldn't be
-namespace-blind. Each kubectl tool is only offered when RBAC actually grants
-the corresponding permission — checked at startup via
-`SelfSubjectAccessReview`, not merely whether in-cluster credentials exist —
-so a partial grant (e.g. reads but not secrets) offers exactly the tools that
-will work, not ones that would just fail RBAC on the first call.
-
-`kubectl_get_secret_keys` is **not** part of `deploy/rbac.yaml` — it requires
-a separate, deliberate `kubectl apply -f deploy/rbac-secrets.example.yaml`,
-namespace-scoped, never cluster-wide (putting it in the same file as the
-default-applied manifest, even with an "opt-in" comment, meant it was applied
-by default regardless — `kubectl apply -f` doesn't read comments). `kubectl_get`
-never returns Secret content; `kubectl_get_secret_keys` returns only a
-Secret's key names, never decoded values, since Secret content flowing into
-Claude's context risks it being echoed into a PR body, Slack message, or the
-investigation record.
-
-`kubectl_rollout_restart`/`kubectl_scale` require **both** `action_mode: act`
-*and* `allow_kubernetes_mutations: true` in config.yaml (default `false`) —
-act mode alone (opening PRs, posting to Slack) is a much smaller blast radius
-than directly mutating a live workload, so enabling it doesn't silently also
-hand an LLM production restart/scale authority; that's a separate, deliberate
-opt-in. These are scoped per-namespace (matching `scope_namespaces`), not
-cluster-wide, since a bad restart/scale call has a much bigger blast radius
-than a bad read. If RBAC isn't applied, the agent starts fine and simply omits these tools for
-that run — see `newKubeClient` in `kube.go`.
-
-Everything these tools *do* return — ConfigMap data, pod logs, resource
-specs — is not similarly filtered: it's sent to Anthropic's API as part of
-the investigation (see [Cost](#cost)) and may be echoed into a PR body, Slack
-message, or the investigation record, the same as source code Claude reads
-via GitHub. If your ConfigMaps or logs can contain sensitive data (tokens
-embedded in a log line, an internal hostname you don't want to leave the
-cluster), account for that before granting broad read access, the same way
-you would for any tool that lets an LLM read cluster state.
-
-## Extending with other observability sources (Prometheus, Grafana, etc.)
-
-`mcp_servers` in config.yaml already supports arbitrary extra MCP servers
-beyond the built-in Causely one — **no code change required**. Each entry
-becomes a set of tools Claude can call, prefixed by that server's `name` (so
-a `prometheus` entry's tools show up as `prometheus__query_range`, etc. —
-see `buildTools` in `agent.go`). You can add as many as you like:
-
-```yaml
-mcp_servers:
-  - name: prometheus
-    url: https://prometheus.example.com/mcp
-    description: "raw metrics, PromQL queries"
-  - name: grafana
-    url: https://grafana.example.com/mcp
-    description: "dashboards and panel data"
-    token: "..."  # optional bearer token — see the Known limitations note below
+```
+OUTCOME: fix_pr | remediation | no_action_needed | already_handled | out_of_scope | blocked
+ISSUE: <Causely issue ID>
+ENTITY: <entity name> (<namespace>)
+ACTION_TAKEN: <PR URL | command run | ledger issue URL | none>
+SUMMARY: <one or two sentences>
 ```
 
-The `description` field matters: it's what tells Claude *when* to reach for
-each source (surfaced in the system prompt alongside every other configured
-source), so a specific, distinguishing description is worth writing rather
-than leaving it blank.
+### The ledger
 
-## A third terminal outcome: no_action_needed
+Actors are ephemeral and the mediator can notify several times about one
+issue (detection, identity change, re-detection), so "already investigated"
+has to live outside the Actor. It lives in GitHub, next to the PRs it
+deduplicates: one issue per Causely issue in `CAUSELY_GITHUB_REPO`, labeled
+`causely-investigation`, body containing `causely-issue: <id>`, one comment
+per claim and per outcome. People can read it, close it, or re-trigger with
+`force`. Lookups use the REST list endpoint rather than search, which lags new
+issues. Set `CAUSELY_LEDGER=off` to disable it (no dedup; observe mode then
+makes no GitHub writes at all).
 
-Beyond `recommend_remediation` and `propose_fix`, the agent can call
-`no_action_needed` — for when investigation shows there's no genuine defect:
-the flagged exception is already caught and handled gracefully by design
-(e.g. a broad `except` that logs a warning and deliberately continues), or
-the issue has already fully self-resolved and the live state already matches
-what any fix would produce. Without this, the tool schema would force an
-action-shaped answer even when the correct answer is "nothing is actually
-wrong" — found by manually investigating a cleared issue where Causely's own
-diagnosis was named `PythonUnhandledException`, but the exact source line
-producing it was inside a `try/except Exception` block explicitly commented
-"best effort, don't fail the whole request." The system prompt now instructs
-Claude to verify a diagnosis this way (check live state against any proposed
-change, find and read the actual code around a cited log line) before
-concluding a fix or remediation is warranted at all — see `buildSystemPrompt`
-in `agent.go`.
+## Safety model
 
-## Not adopting Causely's own suggested remediation
+Policy is set on the **Harness**, so editing the investigator's prompt cannot
+turn on act mode. The adapter applies it in three layers, strongest first:
 
-Causely's Issue detection includes its own LLM-generated remediation
-suggestion (`description.remediationOptions`), sometimes also embedded as a
-concluding sentence inside the Issue's description text (e.g.
-"Remediation should focus on..."). This agent's system prompt (see
-`buildSystemPrompt` in `agent.go`) deliberately never shows Claude that
-suggestion, and explicitly instructs it not to adopt any such sentence found
-inside the description either — this agent's entire value over the generic
-suggestion is its tool access (live cluster state, source code, and whatever
-else is configured) that the suggestion's own generation had none of; showing
-it the suggestion risks anchoring it into restating that guess instead of
-verifying it against real evidence. The suggestion is still captured in each
-`InvestigationRecord` as `causely_remediation_hint`, purely for later human
-comparison against what the agent independently concluded.
+| Property | Credential / RBAC (holds regardless of the model) | Hermes `approvals.deny` (deterministic, terminal only) | Prompt |
+|---|---|---|---|
+| Observe mode: no push, no PR | GitHub token without Contents or Pull requests write (Issues write only, for the ledger) | `git push`, `gh pr create/edit/comment/close`, `gh api` with `-X`/`-f`/`--method`/`--input`, `gh issue edit/close`; `gh issue create/comment` too when the ledger is off | generated policy section |
+| Ledger is append-only | (Issues write cannot be narrowed further) | `gh issue delete/transfer/lock`, `gh label delete` | skill |
+| Never merge, force-push, or push to main/master | Branch protection | `gh pr merge`, `git push --force`, `push ... main` | skill |
+| No cluster writes unless enabled | Read-only ClusterRole; mutate Role is opt-in per namespace | `kubectl apply/create/delete/patch/edit/...` always; `scale` and `rollout restart` unless `act` + `CAUSELY_ALLOW_KUBE_MUTATIONS=true` | generated policy section |
+| Never read Secret values | ClusterRole has no access to Secrets | `kubectl ... secret ... -o/--output/--template`, `--raw`, `exec`, `cp`, `/var/run/secrets/` | system prompt |
+| Never expose credentials | Tokens scoped to one repo / tenant / ServiceAccount | `gh auth token`, `git credential fill`, `*_TOKEN`/`*_API_KEY` names, the secrets directory, `/proc/*/environ` | generated policy section |
+| Only read-only Causely tools | Causely token scope | n/a: write tools are not registered (AgentTemplate `tools` allowlist -> Hermes `tools.include`) | |
 
-## Investigation records
+Other properties:
 
-Every run — regardless of trigger source, and regardless of whether it was
-skipped (out of scope, budget exceeded), failed, or completed — writes one
-`InvestigationRecord` as a line of JSON to `investigation_record_path` (if
-set). It captures: identity, trigger source, action mode, timing, token/cost
-usage, the list of tool calls made (which MCP server, which tool), and the
-verdict. This is the dataset for answering "how well is this actually
-working," not just per-incident Slack messages. See
-`investigation_record.go`.
+- `approvals.mode: manual`, and the adapter's ACP client **rejects every
+  permission request**, so any command Hermes classifies as dangerous fails
+  instead of waiting for a human who is not there.
+- **Credentials never enter the Actor.** Under Agent Substrate 1.0 the
+  model key, the Causely MCP header and the GitHub token stay in Secrets; the
+  Actor sees placeholders, and Substrate's egress gateway (which terminates
+  TLS, trusted through `SSL_CERT_FILE`/`GIT_SSL_CAINFO`) replaces the header
+  on requests to the configured origins
+  ([secrets.md](deploy/kagent/secrets.md), [egress.yaml](deploy/kagent/egress.yaml)).
+  A model that prints its environment learns nothing usable.
+- **Egress is closed by default.** An Actor reaches the model, its MCP
+  servers and the kagent control plane; anything else (GitHub here) needs an
+  `EgressPolicy` the Agent lists.
+- The adapter still keeps kagent's own variables (`KAGENT_TOKEN`, the
+  bootstrap descriptor) and any MCP header variable out of the environment
+  Hermes' tools inherit, for standalone runs that pass real values.
+- `CAUSELY_MAX_TURN_DURATION` (default `20m`, or `CAUSELY_MAX_SWEEP_DURATION`,
+  default `60m`, for a prompt starting with `[causely-sweep]`) cancels a turn
+  that runs too long; the ACP SDK sends `session/cancel` so Hermes stops calling the model.
 
-## Configuration
+**The deny rules are defense in depth, not a sandbox.** Hermes' `execute_code`
+tool can start processes without going through the terminal tool, and every
+command runs as the same Unix user as Hermes. Assume a determined model can
+reach any credential in the Actor, and scope the credentials as described in
+[secrets.md](deploy/kagent/secrets.md). That is the actual boundary, as it was
+for the old service's GitHub token and ServiceAccount.
 
-Non-secret settings come from a YAML config file (`-config`, default
-`/config/config.yaml`); see `deploy/configmap.example.yaml` for every field.
-Credentials come from environment variables only — `ANTHROPIC_API_KEY`,
-`GITHUB_TOKEN`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`,
-`CAUSELY_MCP_TOKEN` (optional, bearer-token auth to the Causely MCP server),
-`CAUSELY_MCP_CLIENT_ID` + `CAUSELY_MCP_CLIENT_SECRET` (optional, HTTP Basic
-auth instead — for a Causely tenant with Frontegg auth enabled, which
-exchanges and caches a Frontegg access token server-side so this agent never
-has to fetch/refresh one itself; set both or neither, and they take
-precedence over `CAUSELY_MCP_TOKEN` if both are set), `TRIGGER_SHARED_SECRET`.
+## How the adapter maps kagent config onto Hermes
 
-**`TRIGGER_SHARED_SECRET` and `SLACK_SIGNING_SECRET` are required — the agent
-refuses to start without them.** An unauthenticated `/trigger` or an
-unverified `/slack/actions` on a network-reachable service means anyone who
-can reach it can spend this instance's Anthropic budget and, in `act` mode,
-open PRs or mutate the cluster. For local/demo use against a throwaway
-cluster only, set `allow_unauthenticated_trigger: true` /
-`allow_unauthenticated_slack_actions: true` in `config.yaml` to explicitly
-accept that risk instead.
+Every Hermes key below was checked against the Hermes Agent v0.23.3 source
+and exercised against that release (config load, MCP interpolation, deny-rule
+matching, SOUL.md scanner, skill discovery), not guessed.
 
-`allowed_severities` (config.yaml, e.g. `["High", "Critical"]`) restricts
-every trigger source to Issues at those severities — see `scope.go`'s
-`inScope` and `poll.go`.
+kagent 1.0 sends a BYO Actor its configuration as a bootstrap bundle the
+adapter fetches from the control plane (`KAGENT_BOOTSTRAP_JSON`): an
+`ADKConfig` protobuf with a `runtime` part (control-plane URL, limits) and
+the `agent` part mapped below. Outside kagent (`--check`, local tests) the
+adapter reads `KAGENT_CONFIG_JSON` and `KAGENT_AGENT_CARD_JSON` instead.
 
-**If `poll.enabled: true` and this is left unset, poll defaults to
-`["High", "Critical"]` on its own** (`pollSeverities` in `poll.go`) — poll
-runs continuously and pays for every genuinely new occurrence it dispatches
-on, so an operator who never touches this setting still gets a sane default
-instead of paying to investigate every low-severity blip. To make poll
-consider every severity, set this explicitly to
-`["Low", "Medium", "High", "Critical"]`. The webhook and Slack paths do
-**not** get this default — an unset `allowed_severities` there truly means
-"no severity filter," since those are driven by a human or by mediator's own
-notification config, not by this agent polling on a timer; if you want the
-same High/Critical-only behavior for webhook-triggered investigations,
-configure that filter on mediator's notification destination itself (which
-severities it forwards to this agent), not here.
+| kagent (`ADKConfig.agent`) | Hermes | Notes |
+|---|---|---|
+| `model` with `anthropic` | `model: {provider: anthropic, default, base_url, max_tokens}` | `ANTHROPIC_API_KEY` holds only a placeholder; the egress gateway adds the real key |
+| `model` with `openai` | `model: {provider: openai, ...}` + `providers.openai` (`key_env: OPENAI_API_KEY`, `api_mode: chat_completions` or `codex_responses`) | as in the reference |
+| other model types, `apiKeyPassthrough` | rejected at startup | |
+| `instruction` | `$HERMES_HOME/SOUL.md` | Hermes' ACP adapter does not read `agent.system_prompt` (CLI only), so the reference's approach drops the prompt in ACP mode. SOUL.md is the identity slot every entry point loads. |
+| `http_tools[]` / `sse_tools[]` | `mcp_servers.<name>: {url, transport: sse?, headers, timeout, ssl_verify, tools.include}` | name derived from the URL host (`api.causely.app` -> `causely`, tools appear as `mcp__causely__<tool>`); binding `tools` -> `tools.include` |
+| header `__KAGENT_ENV[NAME]__` | `${AUXILIARY_NAME_API_KEY}` | Hermes interpolates `${VAR}` at connect time; the rename keeps the value out of subprocess environments. Under Substrate the value is a placeholder the egress gateway replaces |
+| `require_approval`, `allowed_headers`, `stdio_tools`, `agent_plugins`, `sub_agents` | not mapped | Hermes has no per-MCP-server approval; skills ship in the image instead of AgentTemplate `skills`/`plugins` |
+| Harness env `CAUSELY_*` | `approvals.deny` + SOUL.md policy section | see [Safety model](#safety-model) |
+| (image) | `skills.external_dirs: [/opt/causely/skills]`, `terminal.cwd: /data/work`, `approvals.mode: manual` | |
+| (always) | `_config_version: 54`, `tools.tool_search.enabled: off`, `agent.max_turns: 90` | the schema version stops Hermes treating the file as pre-versioning; tool search would otherwise hide some tools, MCP ones included, behind a `tool_search` call, while the prompt names the Causely tools directly; Hermes 0.23 has no iteration cap by default, so 90 keeps the previous per-turn bound |
 
-This setting also closes a real noise source: a chronic, recurring issue's
-severity can flicker between a baseline and an elevated value as it merely
-toggles active/inactive, and poll's watermark (falling back to severity when
-Causely's `get_issues` doesn't provide an `updated_at`) can read that
-flicker as "changed," paying for a second investigation of an event that
-hadn't actually changed. Filtering by severity (passed straight through to
-`get_issues`, so low-severity issues aren't even fetched) closes that off
-regardless of what the watermark does.
+The image also installs the `anthropic` and `mcp` extras of `hermes-agent`.
+The reference lock (`hermes-agent[acp]`) has neither: Hermes then tries to
+`pip install` the Anthropic SDK at runtime (which fails as the non-root user)
+and silently skips every MCP server.
 
-## Securing `/trigger`
+## GitHub: `gh` CLI, not the GitHub MCP server
 
-This is a standalone, network-reachable service — unlike an in-repo call, it
-can't lean on network topology alone. `TRIGGER_SHARED_SECRET` is required;
-the agent refuses to start without it (see [Configuration](#configuration)).
-Set it and require callers to send `Authorization: Bearer <secret>`.
+The agent reads code by cloning the repository and searching it locally with
+`rg` / Hermes' `search_files`, and opens PRs with `gh pr create`. We chose
+this over the GitHub MCP server because:
 
-## Build & run
+- **Better investigation.** A shallow clone plus ripgrep searches a large
+  monorepo exactly and quickly, including `git log` of the suspect file and
+  reading surrounding code. The old service's REST `search_code` tool was its
+  weakest link; MCP code search has the same index limits.
+- **Enforceable.** `git push` and `gh pr ...` go through Hermes' terminal
+  tool, so `approvals.deny` can block them in observe mode. GitHub MCP write
+  tools (`create_or_update_file`, `push_files`, `create_pull_request`) are
+  MCP calls that the deny rules cannot see, so observe mode would rest on the
+  prompt alone.
+- **Cheaper and simpler.** No 40-odd extra tool schemas in every request, no
+  extra RemoteMCPServer, egress or credential.
+
+The token is not reachable from the terminal: `gh` and git send the
+`egress-injected` placeholder and the egress gateway substitutes the real
+token for `api.github.com` (Bearer) and `github.com` (Basic, for git over
+HTTPS). Token scope is still the boundary for what the agent can do with it.
+
+## Extending with other MCP servers
+
+Add a `RemoteMCPServer` (Grafana, Prometheus, an internal tool) and another
+`tools` entry on the AgentTemplate. The adapter maps it into
+`mcp_servers` automatically, and kagent opens egress to its URL; the prompt
+already tells the agent to pick the source whose purpose matches the
+question. Put any credential in `headersFrom` with `type: Secret` so it is
+injected at egress like Causely's. Use the full in-cluster DNS name
+(`<svc>.<ns>.svc.cluster.local`): Actors cannot resolve short names.
+
+## What changed from the Go service
+
+| Old service feature | Status | Replacement, if any |
+|---|---|---|
+| `POST /trigger` webhook (Causely `causelybot` notification) with shared-secret auth | **Replaced** | The mediator's `A2A` notification destination pushes each notification straight to kagent (bearer token to kagent's RPC API), no bridge service ([triggering.md](deploy/kagent/triggering.md)). Needs a mediator version with that destination. |
+| Poll mode (watermarks, re-investigate on change) | **Replaced** | kagent ScheduledRun sweep ([scheduled-sweep.json](deploy/kagent/scheduled-sweep.json)): every 30 min, `get_issues` for active High/Critical issues, up to `CAUSELY_MAX_INVESTIGATIONS_PER_SWEEP`. No per-issue change watermark: an issue is revisited once its ledger entry is older than `CAUSELY_DEDUP_WINDOW`. |
+| Dedup of repeated triggers for the same issue | **Replaced** | GitHub-issue ledger checked before any deep work, in both triggers. The mediator's own `request_id` only makes retries of one notification idempotent. |
+| Staleness check (skip resolved issues) | **Kept, as a pre-check** | `get_issue_details` state check right after scope and ledger; inactive -> `no_action_needed` before any deep investigation. A few model turns instead of free. |
+| Scope check (`scope_namespaces`, repo label) | **Kept, mostly** | `CAUSELY_SCOPE_NAMESPACES`, checked from the notification's `causely.ai/namespace` label before any tool call, and passed as `namespace_names` in sweeps. Prompt-level, plus RBAC limiting mutations to bound namespaces. The repo-label check is gone. |
+| Per-investigation cost cap (`max_cost_usd`) | **Replaced by a time cap** | `CAUSELY_MAX_TURN_DURATION` (20m per issue) / `CAUSELY_MAX_SWEEP_DURATION` (60m per sweep), plus a 90-iteration limit per turn (`agent.max_turns`). No dollar accounting. |
+| Weekly cost cap, concurrency cap | **Lost** | Use Anthropic workspace spend limits on the API key, mediator severity filters, the sweep size, and Substrate WorkerPool capacity. |
+| JSONL investigation records (cost, tool calls, verdict) | **Replaced** | The kagent Session's A2A task history (every text and tool event streamed by the adapter), the parseable `OUTCOME:` block, and the outcome comment on the ledger issue. No cost or token totals. |
+| OpenTelemetry spans per tool call | **Kept, extended** | kagent's harness runtime writes a span per turn (with its token usage), GenAI `execute_tool` spans and token metrics from the events the adapter reports. On when kagent's telemetry is on; see [Tracing](#tracing-opentelemetry). |
+| Slack "Fix it" button and Slack replies in act mode | **Lost** | None in-process. Hermes' Slack gateway is a separate long-running process, not the ACP path. A Slack workflow can run the manual `kagent agent invoke`; results are visible in the ledger issue. |
+| `observe` / `act` | **Kept** | `CAUSELY_ACTION_MODE` on the Harness, enforced by deny rules and token scope. |
+| `allow_kubernetes_mutations` (restart/scale) | **Kept** | `CAUSELY_ALLOW_KUBE_MUTATIONS` (act mode only) + opt-in RBAC. |
+| `kubectl_get_secret_keys` (key names only) | **Lost** | RBAC cannot grant key names without values, so Secrets are not readable at all. |
+| No-op `propose_fix` rejection (search == replace) | **Moved to the model** | Skill requires a non-empty `git diff`, else re-classify. Not enforced in code. |
+| Structured terminal tools (`propose_fix`, `recommend_remediation`, `no_action_needed`) | **Replaced** | The `OUTCOME:` report block. Free text, so a caller must parse it and handle a missing block. |
+| GitHub REST tools (`read_file`, `search_code`, `list_directory`) | **Replaced** | Local clone + `rg` + `gh`. |
+| Extra MCP servers from `config.yaml` (tokens in the ConfigMap) | **Improved** | RemoteMCPServer + Secret-backed `headersFrom`. |
+
+## Tracing (OpenTelemetry)
+
+Telemetry is kagent's. For a BYO Harness the controller passes its exporter
+settings to the Actor as standard `OTEL_*` variables; the adapter starts
+kagent's providers with them (`pkg/telemetry.Init`), and kagent's harness
+runtime, which runs the A2A side of the adapter, writes the spans and
+metrics from the events the adapter reports while translating Hermes' ACP
+stream. Each A2A turn is one trace that continues the controller's:
+
+```
+a2a.request                                   one per turn (issue or sweep), with its token usage
+├── execute_tool mcp__causely__get_issue_details
+├── execute_tool terminal                     kubectl, gh, git, rg ... (failed or denied ones are errors)
+└── execute_tool read_file
+```
+
+- **Turn span.** kagent names it `invoke_agent` only for its own Claude and
+  Codex runtimes; a BYO runtime gets `a2a.request`. The adapter adds the
+  turn's `gen_ai.usage.input_tokens` (cache reads included),
+  `gen_ai.usage.output_tokens` and `gen_ai.usage.cache_read.input_tokens`.
+  Hermes returns the session's cumulative counts with each ACP prompt
+  response; the adapter subtracts the previous turn's (the counts restart
+  at zero in each Hermes process).
+- **`execute_tool` spans** come from Hermes' `tool_call` notification and
+  its `completed`/`failed` update. The adapter reports the bare tool name
+  (Hermes' ACP title is `<tool>: <preview>`), and the MCP server and tool
+  for `mcp__<server>__<tool>` names.
+- **Metrics.** The turn's usage is also reported as a usage-only model call,
+  which kagent adds to its GenAI token metrics, along with its tool metrics.
+- ACP has no per-model-call events, so there are no `chat` spans: model
+  latency, retries and finish reasons are not visible, and token usage is
+  per turn rather than per model call.
+
+Content is **not** recorded by default: no prompts, model output, tool
+arguments or tool results. Set
+`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` in the Harness env
+to let kagent record the prompt and tool arguments (Hermes' raw input, or
+its redacted title preview) and results. Turn it on only if your trace
+backend may hold investigation data (logs, code snippets) for as long as it
+keeps traces.
+
+## Build and test
 
 ```bash
-go build -o causely-background-agent .
-./causely-background-agent -config /path/to/config.yaml
+go build ./... && go test ./...   # adapter unit tests
+make build                        # tests + image for this machine's platform, loaded locally
+make build-all                    # tests + build linux/amd64 and linux/arm64 (no load/push)
+make push                         # tests + push one multi-arch image (PLATFORMS=... to change)
 ```
 
-Or build and push the container:
+Multi-platform builds need a buildx builder that can target both
+architectures (Docker Desktop's default does; on Linux install QEMU binfmt,
+for example `docker run --privileged --rm tonistiigi/binfmt --install all`).
+The Go adapter is cross-compiled on the build host; the Hermes layer is
+installed per platform, under emulation for the non-native one.
+
+Validate an image without calling the model (config, Hermes ACP handshake and
+session creation). `KAGENT_CONFIG_JSON` takes the ADKConfig kagent compiles:
 
 ```bash
-docker build -t docker.io/causelyai/causely-background-agent:latest .
-docker push docker.io/causelyai/causely-background-agent:latest
+docker run --rm -e ANTHROPIC_API_KEY=dummy \
+  -e 'KAGENT_CONFIG_JSON={"runtime":{"control_plane_url":"http://kagent-controller.kagent:8083"},"agent":{"name":"causely_check","instruction":"Investigate.","model":{"model":"claude-opus-5-5","anthropic":{}}}}' \
+  -e 'KAGENT_AGENT_CARD_JSON={"name":"causely_check","description":"check","version":"v1","supportedInterfaces":[{"url":"http://127.0.0.1:80","protocolBinding":"GRPC","protocolVersion":"1.0"}],"capabilities":{"streaming":true},"defaultInputModes":["text"],"defaultOutputModes":["text"],"skills":[]}' \
+  <image> --check
 ```
 
-## Deploy
+## Known limitations and open risks
 
-See [Quick start](#quick-start) above for the full sequence. All of it is
-plain Kubernetes manifests under `deploy/` — no Helm/chart dependency.
-
-## Known limitations
-
-- No Issue-type allowlist — every Issue type triggers an investigation.
-- Extra MCP server tokens (and client_id/client_secret pairs) configured via
-  `mcp_servers` in config.yaml land in the ConfigMap, not a Secret — fine for
-  an unauthenticated server, be aware for an authenticated
-  one.
-- `/data` (investigation records, weekly cost state, poll watermark) is
-  backed by the PVC in `deploy/pvc.yaml`, which survives pod recreation —
-  apply it before `deployment.yaml`. If you deploy `deployment.yaml` without
-  it, Kubernetes will refuse to schedule the pod (no matching volume), rather
-  than silently falling back to ephemeral storage.
-- RBAC can't restrict a Role to only a Secret's key names, not its decoded
-  values — `deploy/rbac-secrets.example.yaml` (opt-in, namespace-scoped, see
-  above) grants `get`/`list` on the full Secret object; the safety boundary
-  that `kubectl_get_secret_keys` never returns decoded values is enforced in
-  this agent's own code (`kube.go`), not by RBAC.
+- **Tested on kind with kagent 1.0.1 and Agent Substrate 1.0** (gVisor
+  WorkerPool, image from a local registry): the golden snapshot builds;
+  sessions run Hermes with an OpenAI ModelConfig through the egress gateway;
+  the in-cluster Causely MCP server's tools are discovered and called; tool
+  events reach kagent; deny rules block `kubectl ... secret`; GitHub is
+  unreachable without an EgressPolicy and reachable with one (`curl`, `gh`,
+  `git` trust the gateway). Not yet exercised there: an Anthropic
+  ModelConfig, token injection for GitHub (no token was available), a real
+  investigation of an active issue (the test cluster had none), the
+  mediator destination and the ScheduledRun, and an OTLP collector.
+- **Deny rules are glob matching on command text.** They catch the obvious
+  forms (including `bash -c`, `cd ... &&`), can be bypassed with enough
+  indirection or via `execute_code`, and occasionally over-block (for
+  example a namespace containing `-o` in a `kubectl ... secret` command).
+  Credentials and RBAC are the boundary.
+- **kubectl has no working credential path inside Substrate 1.0 for an
+  in-cluster API server.** Harness env takes literal values only, so the
+  old `KUBECONFIG_DATA` Secret cannot be used. The adapter supports
+  `CAUSELY_KUBE_API_SERVER`: it writes a kubeconfig with a placeholder token
+  and the gateway CA, for an EgressPolicy that injects a ServiceAccount
+  token. On kind this reached the gateway, but the gateway rejected the API
+  server's certificate (`UnknownIssuer`: it does not trust the cluster CA,
+  and an EgressPolicy cannot add one). It can work for an API server with a
+  publicly trusted certificate. Until Substrate supports this, investigate
+  without kubectl (the shipped Harness does) or give the agent cluster reads
+  through an MCP server instead.
+- **Turn token usage** is Hermes' session counters, which leave out its
+  auxiliary model calls (session titles, context compression); those still
+  cost tokens.
+- **The ledger is enforced by the model, not code.** The adapter cannot see
+  which issue a message is about, so lookup, claim and record are
+  instructions in the prompt and skill. A run that skips them duplicates work
+  (cost), it cannot bypass the safety rules.
+- **Ledger races.** Two runs that start within seconds of each other (the
+  mediator's detect + identity-change notifications, or a push landing during
+  a sweep) can both see no claim and both investigate. Each claims before
+  the deep work, which narrows the window to the first few model turns.
+  Duplicate ledger issues for one Causely issue are possible in that case;
+  lookups match on the `causely-issue:` line, so both are found later.
+- **Observe mode now writes to GitHub** (ledger issues and comments) when the
+  ledger is on. Use a repository where that is acceptable, or
+  `CAUSELY_LEDGER=off` to keep observe strictly read-only and give up dedup.
+- **Mediator destination not exercised here.** The mediator's A2A
+  destination was written for pre-1.0 kagent (it creates an AgentInstance
+  from a Harness and AgentTemplate). kagent 1.0 creates Sessions for an
+  Agent, so the mediator needs to target `kagent/causely-investigator` as an
+  Agent; see triggering.md.
+- **ScheduledRun has no manifest form** in kagent 1.0.1; it is a gRPC call
+  targeting the Agent, so it is not reconciled from Git like the other
+  resources.
+- **Output is free text.** Callers should treat a missing or malformed
+  `OUTCOME:` block as a failed investigation.
+- **One session per Actor**, inherited from the reference runner: a second
+  conversation needs a second kagent Session, which is the intended model
+  anyway (one per issue).
+- **Substrate's `/data` is a fresh tmpfs with a root-owned
+  `/data/workspace`**, so Hermes works in `/data/work` instead.
+- **Pinned upstreams move.** kagent is pinned to v1.0.1 (as a Go
+  pseudo-version, since its Go module has no tag), Hermes to
+  v0.23.3; the AUXILIARY_ env-name trick, the SOUL.md path, the ACP tool
+  title format and the cumulative ACP usage depend on Hermes internals and
+  should be re-checked on upgrade.
+- **Hermes runs a gateway process.** Since 0.23, `hermes acp` is a thin
+  client: sessions, MCP connections and tool execution live in a Hermes
+  gateway it starts on demand, which inherits the adapter-built environment
+  (so the credential handling above still applies), keeps
+  `gateway.pid`/`gateway.sock` under `/data/hermes`, and also runs Hermes'
+  cron and kanban schedulers (idle here). A container restart with `/data`
+  kept, as after a snapshot restore, resumed the session in local testing.
+- **Hermes is installed from source.** Hermes stopped publishing to PyPI
+  after 0.19.0 and refuses wheel builds, so the image downloads the release
+  tarball (sha256-pinned), syncs a venv from Hermes' own `uv.lock`
+  (`--frozen`, hashes from upstream), and writes Hermes' install stamp so
+  `hermes --version` reports the release. To upgrade, change
+  `HERMES_VERSION`, `HERMES_SHA256` and `HERMES_COMMIT` in the Dockerfile.

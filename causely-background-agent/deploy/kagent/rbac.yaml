@@ -1,0 +1,75 @@
+# Read-only Kubernetes identity for the investigator's kubectl.
+#
+# Agent Substrate Actors have no in-cluster ServiceAccount token and kagent
+# 1.0 Harness env takes no Secrets, so this token reaches the API server
+# through an EgressPolicy (see secrets.md, "kubectl"); that currently works
+# only for an API server whose certificate the egress gateway trusts.
+#
+# Read broadly, act narrowly (same split as the old service):
+#   - get/list/watch is cluster-wide, because an issue's real dependency is
+#     often in another namespace than the degraded service.
+#   - Secrets are not readable at all. RBAC cannot grant a Secret's key names
+#     without its values, so the old kubectl_get_secret_keys tool has no safe
+#     equivalent here; the harness also blocks `kubectl ... secret -o ...`.
+#   - Writes (rollout restart, scale) live in rbac-mutate.example.yaml and are
+#     bound per namespace, applied only on purpose.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: causely-investigator
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: causely-investigator
+  namespace: causely-investigator
+---
+# Long-lived token for the kubeconfig. Rotate by deleting and re-creating it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: causely-investigator-token
+  namespace: causely-investigator
+  annotations:
+    kubernetes.io/service-account.name: causely-investigator
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: causely-investigator-read
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "endpoints", "configmaps", "events", "namespaces", "nodes", "persistentvolumeclaims", "serviceaccounts"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: causely-investigator-read
+subjects:
+  - kind: ServiceAccount
+    name: causely-investigator
+    namespace: causely-investigator
+roleRef:
+  kind: ClusterRole
+  name: causely-investigator-read
+  apiGroup: rbac.authorization.k8s.io

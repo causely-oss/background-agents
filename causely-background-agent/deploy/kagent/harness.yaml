@@ -1,0 +1,76 @@
+# The BYO Harness: the image that runs Hermes Agent behind the A2A<->ACP
+# adapter, plus the deployment policy every admitted AgentTemplate inherits.
+#
+# Policy lives here, in spec.env, on purpose: AgentTemplates (and their
+# prompts) can be edited by whoever owns the investigator, but only the
+# Harness owner decides whether the agent may open PRs or touch the cluster.
+# The adapter turns these variables into Hermes approvals.deny rules and a
+# generated section at the end of the system prompt. The credentials are the
+# real boundary, so scope them to match (see secrets.md and rbac.yaml).
+#
+# kagent 1.0 Harness env takes literal values only; credentials never reach
+# the Actor. Substrate's egress gateway adds them to outgoing requests: the
+# model key (ModelConfig), the Causely MCP header (RemoteMCPServer) and the
+# GitHub token (EgressPolicy causely-github in egress.yaml).
+apiVersion: api.kagent.dev/v1alpha3
+kind: Harness
+metadata:
+  name: causely-hermes
+  namespace: kagent
+spec:
+  byo: {}
+  workload:
+    # kagent requires a digest: the image index digest `make push` prints.
+    image: docker.io/causelyai/causely-hermes-harness@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    command:
+      - /usr/local/bin/causely-hermes
+  env:
+    # observe (default): investigate and report, never push or open a PR.
+    # act: open fix PRs with GH_TOKEN. Pair with a token that can write.
+    - name: CAUSELY_ACTION_MODE
+      value: observe
+    # Second gate, only honored in act mode: allow `kubectl rollout restart`
+    # and `kubectl scale`. RBAC (rbac.yaml, mutate Role) must also allow it.
+    - name: CAUSELY_ALLOW_KUBE_MUTATIONS
+      value: "false"
+    # The one repository this deployment investigates and fixes.
+    - name: CAUSELY_GITHUB_REPO
+      value: your-org/your-repo
+    # Optional: comma-separated namespaces this deployment owns. Issues on
+    # entities elsewhere end with OUTCOME: out_of_scope.
+    - name: CAUSELY_SCOPE_NAMESPACES
+      value: ""
+    # Cancel an investigation turn that runs longer than this (Go duration,
+    # "0" disables). The per-investigation spend bound; there is no $ cap.
+    - name: CAUSELY_MAX_TURN_DURATION
+      value: 20m
+    # Same, for a scheduled sweep (a prompt starting with [causely-sweep]).
+    # Keep it below the ScheduledRun's executionTimeout (scheduled-sweep.json).
+    - name: CAUSELY_MAX_SWEEP_DURATION
+      value: 60m
+    - name: CAUSELY_MAX_INVESTIGATIONS_PER_SWEEP
+      value: "3"
+    # Dedup across runs: one GitHub issue per Causely issue in
+    # CAUSELY_GITHUB_REPO, labeled causely-investigation. "off" disables it
+    # (and then observe mode makes no GitHub writes at all). The token needs
+    # Issues write for the ledger, in both modes.
+    - name: CAUSELY_LEDGER
+      value: github-issue
+    # An issue claimed or updated in the ledger within this window is skipped.
+    - name: CAUSELY_DEDUP_WINDOW
+      value: 24h
+    # Not a token: a placeholder gh and git send in their Authorization
+    # header, which the egress gateway replaces with the real token from the
+    # causely-github EgressPolicy (egress.yaml). Delete this entry to run
+    # without GitHub (with CAUSELY_LEDGER=off).
+    - name: GH_TOKEN
+      value: egress-injected
+    # Tool arguments and results on kagent's execute_tool spans are off by
+    # default (they can contain logs and code). To record them, add:
+    # - name: OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
+    #   value: "true"
+  substrate:
+    workerPoolRef:
+      name: kagent-default
+    snapshotPolicy:
+      location: gs://your-snapshot-bucket/kagent/causely-hermes

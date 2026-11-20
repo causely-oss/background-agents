@@ -1,0 +1,15 @@
+{
+  "agent": {
+    "namespace": "kagent",
+    "name": "causely-investigator"
+  },
+  "requestId": "causely-sweep-v1",
+  "config": {
+    "name": "causely-sweep",
+    "schedule": "*/30 * * * *",
+    "timeZone": "UTC",
+    "executionTimeout": "3900s",
+    "paused": false,
+    "prompt": "[causely-sweep]\nSweep active Causely issues and investigate the ones nobody has handled yet.\n\nOnly consider issues whose current severity is High or Critical.\nFollow the sweep procedure in the causely-investigation skill: list with get_issues, skip what the ledger or scope rules out, investigate up to the per-sweep limit from your deployment policy, record each outcome in the ledger, and end with one OUTCOME block per issue plus the SWEEP_SUMMARY block."
+  }
+}
